@@ -31,21 +31,43 @@
 - フレーム抽出レート (1〜10 FPS)
 - 最大フレーム数 (10〜100)
 
+### 5. バックグラウンド解析と進捗表示
+- 解析中も他のタブを操作可能。アプリをバックグラウンドに移しても `BGContinuedProcessingTask` で解析を継続
+- タブバー上のアクセサリと解析タブのバッジで進捗を表示（どのタブからでもキャンセル可能）
+
+### 6. 解析結果の保存と共有
+- 解析完了時に自動保存し、「履歴」タブから見返し・削除が可能
+- 共有メニューから LLM 向けテキスト（前提・集計・位置指標・フレーム別サマリ・依頼文）や JSON を ChatGPT / Claude などへ共有
+
+### 7. AIアドバイス（Apple Intelligence）
+- Foundation Models のオンデバイス LLM が、位置や密集度などの指標から総評・観察ポイント・改善提案を生成
+- Apple Intelligence 非対応端末・未有効化の場合は理由を表示
+
 ## 🏗️ アーキテクチャ
 
 ```
 learn-yolo-sports/
 ├── learn_yolo_sportsApp.swift         # エントリーポイント
 ├── Models/
-│   └── DetectionModels.swift          # データモデル
+│   ├── DetectionModels.swift          # データモデル
+│   ├── SavedAnalysis.swift            # 保存用モデル
+│   └── AnalysisMetrics.swift          # 位置・密集度などの指標
 ├── Services/
 │   ├── VideoFrameExtractor.swift      # フレーム抽出
-│   └── YOLODetector.swift             # YOLO検出エンジン
+│   ├── YOLODetector.swift             # YOLO検出エンジン
+│   ├── ContinuedProcessingSession.swift # バックグラウンド継続
+│   ├── AnalysisStore.swift            # 解析結果の保存
+│   ├── AnalysisReport.swift           # LLM 向けテキスト生成
+│   └── IntelligenceAdvisor.swift      # Apple Intelligence アドバイス
 ├── Views/
 │   ├── ContentView.swift              # メインタブビュー
 │   ├── VideoPickerView.swift          # 動画選択
 │   ├── VideoPlayerView.swift          # 動画プレーヤー
 │   ├── VideoAnalysisView.swift        # 解析メインビュー
+│   ├── AnalysisResultView.swift       # 解析結果表示・共有
+│   ├── AnalysisProgressAccessory.swift # タブバーの進捗表示
+│   ├── HistoryView.swift              # 解析履歴
+│   ├── AdviceView.swift               # AIアドバイス
 │   ├── DetectionOverlayView.swift     # 検出結果表示
 │   └── InfoView.swift                 # アプリ情報
 ├── ViewModels/
@@ -104,6 +126,8 @@ docs/
 - **NSCameraUsageDescription**: カメラアクセス（将来の機能用）
 - **NSMicrophoneUsageDescription**: マイクアクセス（将来の機能用）
 
+バックグラウンド解析用の `BGTaskSchedulerPermittedIdentifiers` は `learn-yolo-sports-Info.plist` に記載し、生成される Info.plist にマージしています。
+
 ## 🤖 YOLOモデルについて
 
 [mobadam/football-player-detection](https://huggingface.co/mobadam/football-player-detection)（YOLO26l, Apache-2.0）を使用しています。サッカー中継映像で学習されたモデルです。
@@ -127,6 +151,8 @@ docs/
 - **Core ML**: 機械学習推論
 - **Swift Concurrency**: 非同期処理（async/await, Actor）
 - **Observation**: 状態管理（@Observable）
+- **BackgroundTasks**: バックグラウンド継続（BGContinuedProcessingTask）
+- **Foundation Models**: オンデバイス LLM によるアドバイス
 
 ## 📚 参考
 
