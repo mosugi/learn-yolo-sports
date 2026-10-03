@@ -151,7 +151,7 @@ struct VideoAnalysisView: View {
                     
                         HStack(spacing: 20) {
                             Label("\(viewModel.settings.framesPerSecond) FPS", systemImage: "film")
-                            Label("\(CoachReport.time(viewModel.settings.startTime)) から \(Int(viewModel.settings.duration)) 秒", systemImage: "timer")
+                            Label("\(CoachReport.time(viewModel.settings.startTime)) から \(durationText(viewModel.settings.duration))", systemImage: "timer")
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -316,11 +316,17 @@ struct VideoAnalysisView: View {
                         Slider(value: $viewModel.settings.startTime, in: 0...max(1, videoDuration - 1), step: 1)
                     }
                     Stepper(
-                        "長さ: \(Int(viewModel.settings.duration)) 秒",
+                        "長さ: \(durationText(viewModel.settings.duration))",
                         value: $viewModel.settings.duration,
-                        in: 5...600,
-                        step: 5
+                        in: 15...2700,
+                        step: viewModel.settings.duration >= 300 ? 60 : 15
                     )
+                    Button("動画の最後まで") {
+                        viewModel.settings.duration = min(2700, max(15, (videoDuration - viewModel.settings.startTime).rounded(.up)))
+                    }
+                    Text("約 \(Int(viewModel.settings.duration) * viewModel.settings.framesPerSecond) フレームを処理します")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 
                 Section("検出") {
@@ -332,6 +338,9 @@ struct VideoAnalysisView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("選手の追跡とボール保持の判定には 3〜5 FPS 程度を推奨します。1〜2 FPS では切り替えの局面が判定しにくくなります。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("得点シーンを探す場合は、試合全体（最長 45 分）を 2 FPS 程度で解析すると処理時間を抑えられます。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("カメラを固定して撮影した動画が対象です。カメラが動いたフレームは戦術分析から除外されます。")
@@ -350,6 +359,11 @@ struct VideoAnalysisView: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+    
+    private func durationText(_ seconds: Double) -> String {
+        let value = Int(seconds)
+        return value >= 60 ? "\(value / 60) 分 \(value % 60) 秒" : "\(value) 秒"
     }
     
     /// コート設定の画面を開く（解析の開始位置のフレームを使う）

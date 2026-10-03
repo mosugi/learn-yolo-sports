@@ -56,26 +56,7 @@ struct PitchDiagramView: View {
         }
         func r(_ meters: Double) -> Double { meters * scale }
 
-        // 芝とライン
-        context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.16, green: 0.45, blue: 0.24)))
-
-        let s = setup.lengthScale
-        var lines = Path()
-        lines.addRect(CGRect(x: 0, y: 0, width: r(length), height: r(width)).insetBy(dx: 1, dy: 1))
-        lines.move(to: p(CGPoint(x: length / 2, y: 0)))
-        lines.addLine(to: p(CGPoint(x: length / 2, y: width)))
-        let circleRadius = r(9.15 * s)
-        lines.addEllipse(in: CGRect(
-            x: r(length / 2) - circleRadius,
-            y: r(width / 2) - circleRadius,
-            width: circleRadius * 2,
-            height: circleRadius * 2
-        ))
-        let boxDepth = 16.5 * s
-        let boxWidth = min(40.3 * s, width * 0.8)
-        lines.addRect(CGRect(x: 0, y: r((width - boxWidth) / 2), width: r(boxDepth), height: r(boxWidth)))
-        lines.addRect(CGRect(x: r(length - boxDepth), y: r((width - boxWidth) / 2), width: r(boxDepth), height: r(boxWidth)))
-        context.stroke(lines, with: .color(.white.opacity(0.7)), lineWidth: 1)
+        Self.drawPitch(in: context, size: size, setup: setup)
 
         // 強調表示
         switch snapshot.highlight {
@@ -120,6 +101,38 @@ struct PitchDiagramView: View {
             context.fill(Path(ellipseIn: rect), with: .color(.white))
             context.stroke(Path(ellipseIn: rect), with: .color(.black), lineWidth: 1)
         }
+    }
+
+    /// 芝とコートのラインを描く
+    static func drawPitch(in context: GraphicsContext, size: CGSize, setup: AnalysisSetup) {
+        let length = setup.pitchLength
+        let width = setup.pitchWidth
+        let scale = size.width / length
+        func p(_ point: CGPoint) -> CGPoint {
+            CGPoint(x: point.x * scale, y: point.y * scale)
+        }
+        func r(_ meters: Double) -> Double { meters * scale }
+
+        // 芝とライン
+        context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.16, green: 0.45, blue: 0.24)))
+
+        let s = setup.lengthScale
+        var lines = Path()
+        lines.addRect(CGRect(x: 0, y: 0, width: r(length), height: r(width)).insetBy(dx: 1, dy: 1))
+        lines.move(to: p(CGPoint(x: length / 2, y: 0)))
+        lines.addLine(to: p(CGPoint(x: length / 2, y: width)))
+        let circleRadius = r(9.15 * s)
+        lines.addEllipse(in: CGRect(
+            x: r(length / 2) - circleRadius,
+            y: r(width / 2) - circleRadius,
+            width: circleRadius * 2,
+            height: circleRadius * 2
+        ))
+        let boxDepth = 16.5 * s
+        let boxWidth = min(40.3 * s, width * 0.8)
+        lines.addRect(CGRect(x: 0, y: r((width - boxWidth) / 2), width: r(boxDepth), height: r(boxWidth)))
+        lines.addRect(CGRect(x: r(length - boxDepth), y: r((width - boxWidth) / 2), width: r(boxDepth), height: r(boxWidth)))
+        context.stroke(lines, with: .color(.white.opacity(0.7)), lineWidth: 1)
     }
 
     private func drawPlayer(in context: GraphicsContext, at center: CGPoint, size: CGFloat, color: Color, isGoalkeeper: Bool) {

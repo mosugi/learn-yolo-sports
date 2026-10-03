@@ -25,6 +25,20 @@ nonisolated struct AnalysisSetup: Codable, Hashable {
     var ownSamplePoint: CGPoint
     /// 自チームが画面右のゴールへ攻めるか
     var ownAttacksRight: Bool
+    /// 自チームの背番号と名前（任意。背番号の読み取り結果の絞り込みと表示に使う）
+    var roster: [RosterEntry]? = nil
+    
+    var rosterEntries: [RosterEntry] {
+        roster ?? []
+    }
+    
+    /// 背番号に対応する表示名（例: #10 田中）
+    func playerName(number: Int) -> String {
+        if let entry = rosterEntries.first(where: { $0.number == number }), !entry.name.isEmpty {
+            return "#\(number) \(entry.name)"
+        }
+        return "#\(number)"
+    }
 
     /// 対象チーム（自チーム）
     static let ownTeamName = "自チーム"
@@ -45,6 +59,32 @@ nonisolated struct AnalysisSetup: Codable, Hashable {
         let isLeftHalf = x < pitchLength / 2
         // 右へ攻めるチームは左のゴールを守る
         return isLeftHalf == ownAttacksRight ? .own : .opponent
+    }
+}
+
+/// 背番号と名前
+nonisolated struct RosterEntry: Codable, Hashable, Identifiable {
+    let number: Int
+    let name: String
+    
+    var id: Int { number }
+    
+    /// 「10 田中」のような行を並べたテキストから読み込む
+    static func parse(_ text: String) -> [RosterEntry] {
+        var entries: [RosterEntry] = []
+        for line in text.split(whereSeparator: \.isNewline) {
+            let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "　" || $0 == "," || $0 == "、" })
+            guard let first = parts.first, let number = Int(first), (0...99).contains(number),
+                  !entries.contains(where: { $0.number == number }) else { continue }
+            let name = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
+            entries.append(RosterEntry(number: number, name: name))
+        }
+        return entries.sorted { $0.number < $1.number }
+    }
+    
+    /// parse(_:) で読み込めるテキストに戻す
+    static func text(for entries: [RosterEntry]) -> String {
+        entries.map { $0.name.isEmpty ? "\($0.number)" : "\($0.number) \($0.name)" }.joined(separator: "\n")
     }
 }
 

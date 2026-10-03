@@ -42,6 +42,15 @@ nonisolated enum MatchFormat: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    /// ゴールの幅（m）
+    var goalWidth: Double {
+        switch self {
+        case .elevenASide: return 7.32
+        case .eightASide: return 5.0
+        case .futsal: return 3.0
+        }
+    }
+    
     /// チームの形を評価するのに必要な、検出できたフィールドプレーヤーの最小人数
     var minimumFieldPlayers: Int {
         switch self {

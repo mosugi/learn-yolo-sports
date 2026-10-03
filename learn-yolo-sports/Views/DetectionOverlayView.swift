@@ -17,6 +17,8 @@ struct AnnotatedFrameView: View {
     var courtLines: [(CGPoint, CGPoint)] = []
     /// ラベルを表示するか（小さな表示では省く）
     var showsLabels = true
+    /// 追跡 ID ごとの背番号
+    var trackNumbers: [Int: Int] = [:]
 
     var body: some View {
         GeometryReader { geometry in
@@ -67,10 +69,7 @@ struct AnnotatedFrameView: View {
     }
 
     private func label(for detection: SavedDetection) -> String {
-        if let trackID = detection.trackID {
-            return "\(detection.displayName) #\(trackID)"
-        }
-        return detection.displayName
+        detection.label(trackNumbers: trackNumbers)
     }
 
     private func point(_ normalized: CGPoint, in fit: CGRect) -> CGPoint {
@@ -105,7 +104,8 @@ struct SavedFrameView: View {
                     image: image,
                     detections: frame.detections,
                     courtLines: record.setup.flatMap { CourtGeometry(setup: $0) }?.imageLineSegments() ?? [],
-                    showsLabels: showsLabels
+                    showsLabels: showsLabels,
+                    trackNumbers: record.effectiveTrackNumbers
                 )
             } else if didLoad {
                 ContentUnavailableView("画像なし", systemImage: "photo")
@@ -126,45 +126,64 @@ struct SavedFrameView: View {
 /// 検出結果リスト表示
 struct DetectionListView: View {
     let detections: [SavedDetection]
+    var trackNumbers: [Int: Int] = [:]
+    /// 自チームの選手をタップしたとき（背番号の割り当てに使う）
+    var onSelectPlayer: ((SavedDetection) -> Void)? = nil
 
     var body: some View {
         LazyVStack(spacing: 8) {
             ForEach(Array(detections.enumerated()), id: \.offset) { _, detection in
-                HStack {
-                    Circle()
-                        .fill(detection.displayColor)
-                        .frame(width: 12, height: 12)
-
-                    Text(detection.displayName)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                        .foregroundStyle(detection.isExcluded ? .secondary : .primary)
-
-                    if let position = detection.pitchPosition, !detection.isExcluded {
-                        Text(String(format: "(%.0f, %.0f) m", position.x, position.y))
-                            .font(.caption2)
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
+                row(detection)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if detection.team == .own, detection.trackID != nil {
+                            onSelectPlayer?(detection)
+                        }
                     }
-
-                    Spacer()
-
-                    Text("\(detection.confidencePercentage)%")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(detection.displayColor.opacity(0.2))
-                        .cornerRadius(8)
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(Color(.systemBackground))
-                .cornerRadius(10)
-                .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
             }
         }
         .padding()
+    }
+
+    private func row(_ detection: SavedDetection) -> some View {
+        HStack {
+            Circle()
+                .fill(detection.displayColor)
+                .frame(width: 12, height: 12)
+
+            Text(detection.label(trackNumbers: trackNumbers))
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundStyle(detection.isExcluded ? .secondary : .primary)
+
+            if let position = detection.pitchPosition, !detection.isExcluded {
+                Text(String(format: "(%.0f, %.0f) m", Double(position.x), Double(position.y)))
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if detection.team == .own, detection.trackID != nil, onSelectPlayer != nil {
+                Image(systemName: "number")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("\(detection.confidencePercentage)%")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(detection.displayColor.opacity(0.2))
+                .cornerRadius(8)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(Color(.systemBackground))
+        .cornerRadius(10)
+        .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
     }
 }
 

@@ -57,6 +57,22 @@ nonisolated enum AnalysisReport {
             lines.append("## コーチ解説（規則に基づく判定）")
             lines.append(report.promptText)
             lines.append("")
+            
+            let chapters = record.chapterList
+            if !chapters.isEmpty {
+                lines.append("## 得点シーン")
+                for chapter in chapters {
+                    lines.append("- \(CoachReport.time(chapter.eventTime)) \(chapter.title(setup: record.setup))（\(chapter.note)）")
+                }
+                lines.append("")
+            }
+            
+            let players = PlayerAnalyzer.reports(for: record)
+            if !players.isEmpty {
+                lines.append("## 選手別（背番号）")
+                lines.append(contentsOf: players.map { "- \($0.summaryLine)" })
+                lines.append("")
+            }
         } else {
             lines.append("## 位置に関する指標")
             lines.append(AnalysisMetrics(record: record).summaryText)
@@ -120,7 +136,7 @@ nonisolated enum AnalysisReport {
         lines.append("## お願いしたいこと")
         lines.append("1. この時間帯の試合状況（攻守、ボールのある位置、チームの形など）の読み取り")
         lines.append("2. 気になる点と、その根拠となるフレーム")
-        lines.append("3. チーム・選手への具体的な改善提案")
+        lines.append("3. チーム・選手（背番号が分かる選手は個別に）への具体的な改善提案")
         lines.append("4. 検出結果だけでは判断できない点")
         
         return lines.joined(separator: "\n")

@@ -19,6 +19,9 @@ nonisolated struct GeneratedAdvice {
     
     @Guide(description: "次の練習や試合で取り組むこと。具体的な行動を示す短い日本語の文", .count(3))
     var suggestions: [String]
+    
+    @Guide(description: "背番号を挙げた選手ごとの短いアドバイス。「#10: 〜」の形式の日本語。選手の情報がなければ空", .maximumCount(5))
+    var playerAdvice: [String]
 }
 
 /// Apple Intelligence（Foundation Models）を使って解析結果へのアドバイスを生成する
@@ -90,7 +93,8 @@ final class IntelligenceAdvisor {
                     summary: partial?.summary ?? "",
                     observations: partial?.observations ?? [],
                     suggestions: partial?.suggestions ?? [],
-                    generatedAt: Date()
+                    generatedAt: Date(),
+                    playerAdvice: partial?.playerAdvice ?? []
                 )
                 state = .idle
                 onComplete(advice)
@@ -121,8 +125,23 @@ final class IntelligenceAdvisor {
             }
             lines.append("")
             lines.append(report.promptText)
+            let chapters = record.chapterList
+            if !chapters.isEmpty {
+                lines.append("")
+                lines.append("## 得点シーン")
+                lines.append(contentsOf: chapters.map { "- \(CoachReport.time($0.eventTime)) \($0.title(setup: setup))" })
+            }
+            // オンデバイス LLM は入力が短いため、選手は追跡できた時間の長い順に絞る
+            let players = PlayerAnalyzer.reports(for: record)
+                .sorted { $0.observedTime > $1.observedTime }
+                .prefix(6)
+            if !players.isEmpty {
+                lines.append("")
+                lines.append("## 選手別（背番号）")
+                lines.append(contentsOf: players.map { "- \($0.summaryLine)" })
+            }
             lines.append("")
-            lines.append("この結果から、総評、場面ごとの解説、次に取り組むことを作成してください。")
+            lines.append("この結果から、総評、場面ごとの解説、次に取り組むこと、背番号ごとの選手へのアドバイスを作成してください。")
             return lines.joined(separator: "\n")
         }
         

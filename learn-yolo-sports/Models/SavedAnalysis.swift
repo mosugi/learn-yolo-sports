@@ -22,6 +22,8 @@ nonisolated struct SavedDetection: Codable, Hashable {
     var team: TeamSide? = nil
     /// 追跡 ID
     var trackID: Int? = nil
+    /// このフレームで読み取れた背番号
+    var jerseyNumber: Int? = nil
     
     /// 解析対象から外した検出（対象コート外）か
     var isExcluded: Bool {
@@ -42,6 +44,12 @@ nonisolated struct SavedFrame: Codable, Hashable, Identifiable {
     /// 解析ディレクトリ内の画像ファイル名
     let imageFileName: String?
     let detections: [SavedDetection]
+    /// 自チームから見た局面（コート設定がある場合）
+    var phase: GamePhase? = nil
+    /// ボール保持チーム
+    var possession: TeamSide? = nil
+    /// ボールのピッチ座標（短い欠損は補間済み）
+    var ball: CGPoint? = nil
     
     var id: Int { frameNumber }
     
@@ -57,6 +65,8 @@ nonisolated struct AnalysisAdvice: Codable, Hashable {
     let observations: [String]
     let suggestions: [String]
     let generatedAt: Date
+    /// 背番号ごとのアドバイス（例: #10: 〜）
+    var playerAdvice: [String]? = nil
 }
 
 /// 保存された解析結果
@@ -78,6 +88,30 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     var setup: AnalysisSetup? = nil
     /// ルールベースのコーチ解説（コート設定がある場合のみ）
     var coachReport: CoachReport? = nil
+    /// 得点シーンなどのチャプター
+    var chapters: [MatchChapter]? = nil
+    /// 背番号の読み取りから推定した、追跡 ID ごとの背番号
+    var trackNumbers: [Int: Int]? = nil
+    /// ユーザーが割り当てた背番号（追跡 ID → 背番号。0 は割り当ての解除）
+    var numberOverrides: [Int: Int]? = nil
+    
+    /// 追跡 ID ごとの背番号（ユーザーの割り当てを優先）
+    var effectiveTrackNumbers: [Int: Int] {
+        var numbers = trackNumbers ?? [:]
+        for (trackID, number) in numberOverrides ?? [:] {
+            numbers[trackID] = number > 0 ? number : nil
+        }
+        return numbers
+    }
+    
+    var chapterList: [MatchChapter] {
+        (chapters ?? []).sorted { $0.eventTime < $1.eventTime }
+    }
+    
+    /// 動画ファイル（取り込み時に Documents へコピーしたもの）
+    var videoURL: URL {
+        URL.documentsDirectory.appending(path: videoName)
+    }
     
     /// 画像が保存されているフレーム
     var framesWithImages: [SavedFrame] {
@@ -127,7 +161,7 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
 
 extension SavedFrame {
     /// 解析結果から保存用のフレームを作る
-    nonisolated init(processed frame: ProcessedFrame, assignments: [Int: DetectionAssignment]?) {
+    nonisolated init(processed frame: ProcessedFrame, assignments: [Int: DetectionAssignment]?, state: FrameState?) {
         self.init(
             frameNumber: frame.index,
             timestamp: frame.timestamp,
@@ -141,9 +175,13 @@ extension SavedFrame {
                     pitchPosition: detection.pitchPosition,
                     inCourt: detection.inCourt,
                     team: assignment?.team,
-                    trackID: assignment?.trackID
+                    trackID: assignment?.trackID,
+                    jerseyNumber: detection.jerseyNumber
                 )
-            }
+            },
+            phase: state?.phase,
+            possession: state?.possession,
+            ball: state?.ball
         )
     }
 }

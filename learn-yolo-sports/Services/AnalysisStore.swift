@@ -120,7 +120,14 @@ final class AnalysisStore {
         try data.write(to: jsonURL(for: record), options: .atomic)
     }
     
-    /// 解析結果を削除する
+    /// 保存済みの解析結果の一部を書き換えて保存する
+    func modify(_ id: UUID, _ change: (inout SavedAnalysis) -> Void) throws {
+        guard var record = record(for: id) else { return }
+        change(&record)
+        try update(record)
+    }
+    
+        /// 解析結果を削除する
     func delete(_ record: SavedAnalysis) {
         records.removeAll { $0.id == record.id }
         

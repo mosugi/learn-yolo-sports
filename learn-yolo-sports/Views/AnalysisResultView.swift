@@ -14,6 +14,8 @@ struct AnalysisResultView: View {
 
     private enum Tab: Hashable {
         case coach
+        case goals
+        case players
         case detections
     }
 
@@ -29,8 +31,10 @@ struct AnalysisResultView: View {
         VStack(spacing: 0) {
             if let report = record.coachReport, let setup = record.setup {
                 Picker("表示", selection: $tab) {
-                    Text("コーチ解説").tag(Tab.coach)
-                    Text("検出結果").tag(Tab.detections)
+                    Text("解説").tag(Tab.coach)
+                    Text("得点").tag(Tab.goals)
+                    Text("選手").tag(Tab.players)
+                    Text("検出").tag(Tab.detections)
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
@@ -39,6 +43,10 @@ struct AnalysisResultView: View {
                 switch tab {
                 case .coach:
                     CoachReportView(record: record, report: report, setup: setup)
+                case .goals:
+                    ChaptersView(record: record)
+                case .players:
+                    PlayersView(record: record, setup: setup)
                 case .detections:
                     DetectionBrowserView(record: record)
                 }
@@ -69,9 +77,13 @@ struct AnalysisResultView: View {
 
 /// フレームごとの検出結果
 struct DetectionBrowserView: View {
+    @Environment(AnalysisStore.self) private var store
     let record: SavedAnalysis
 
     @State private var selectedFrameIndex = 0
+    @State private var selectedTrack: SelectedTrack?
+    @State private var showingGoalOptions = false
+    @State private var message: String?
 
     var body: some View {
         // 画像が保存されているフレームだけをたどる
@@ -91,6 +103,26 @@ struct DetectionBrowserView: View {
 
                     Text(detectionSummary(frame))
                         .font(.headline)
+
+                    if record.setup != nil {
+                        Button {
+                            showingGoalOptions = true
+                        } label: {
+                            Label("この時刻を得点シーンに追加", systemImage: "soccerball")
+                                .font(.caption)
+                        }
+                        .confirmationDialog("得点したチーム", isPresented: $showingGoalOptions, titleVisibility: .visible) {
+                            Button(TeamSide.own.displayName) { addGoal(at: frame.timestamp, team: .own) }
+                            Button(TeamSide.opponent.displayName) { addGoal(at: frame.timestamp, team: .opponent) }
+                            Button("キャンセル", role: .cancel) {}
+                        }
+                    }
+
+                    if let message {
+                        Text(message)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)
@@ -107,7 +139,15 @@ struct DetectionBrowserView: View {
                             description: Text("このフレームでは何も検出されませんでした")
                         )
                     } else {
-                        DetectionListView(detections: frame.detections)
+                        DetectionListView(
+                            detections: frame.detections,
+                            trackNumbers: record.effectiveTrackNumbers,
+                            onSelectPlayer: { detection in
+                                if let trackID = detection.trackID {
+                                    selectedTrack = SelectedTrack(id: trackID)
+                                }
+                            }
+                        )
                     }
                 }
 
@@ -115,6 +155,30 @@ struct DetectionBrowserView: View {
             } else {
                 ContentUnavailableView("フレームがありません", systemImage: "photo.stack")
             }
+        }
+        .sheet(item: $selectedTrack) { track in
+            NumberAssignmentSheet(record: record, trackID: track.id)
+        }
+    }
+
+    /// 手動で得点シーンを追加する（選んだ時刻の 12 秒前から再生する）
+    private func addGoal(at time: Double, team: TeamSide) {
+        let chapter = MatchChapter(
+            kind: .manual,
+            startTime: max(0, time - 12),
+            eventTime: time,
+            endTime: time + 6,
+            scoringTeam: team,
+            scorerNumber: nil,
+            note: "手動で追加"
+        )
+        do {
+            try store.modify(record.id) { record in
+                record.chapters = record.chapterList + [chapter]
+            }
+            message = "\(CoachReport.time(time)) を得点シーンに追加しました"
+        } catch {
+            message = "追加できませんでした: \(error.localizedDescription)"
         }
     }
 
@@ -217,6 +281,15 @@ struct AnalysisShareMenu: View {
                 UIPasteboard.general.string = report
             } label: {
                 Label("LLM向けテキストをコピー", systemImage: "doc.on.doc")
+            }
+
+            let chapters = record.chapterList
+            if !chapters.isEmpty {
+                Button {
+                    UIPasteboard.general.string = MatchChapter.chapterText(chapters, setup: record.setup)
+                } label: {
+                    Label("得点チャプターをコピー", systemImage: "list.bullet.rectangle")
+                }
             }
 
             let jsonURL = store.jsonURL(for: record)

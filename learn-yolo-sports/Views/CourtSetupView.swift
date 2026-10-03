@@ -23,6 +23,7 @@ struct CourtSetupView: View {
     @State private var ownColor: LabColor?
     @State private var ownAttacksRight: Bool
     @State private var pixels: PixelImage?
+    @State private var rosterText: String
 
     private static let coordinateSpaceName = "setupImage"
 
@@ -38,6 +39,7 @@ struct CourtSetupView: View {
         _ownPoint = State(initialValue: initialSetup?.ownSamplePoint)
         _ownColor = State(initialValue: initialSetup?.ownColor)
         _ownAttacksRight = State(initialValue: initialSetup?.ownAttacksRight ?? true)
+        _rosterText = State(initialValue: RosterEntry.text(for: initialSetup?.rosterEntries ?? []))
     }
 
     /// 入力中の設定（未完了なら nil）
@@ -51,8 +53,13 @@ struct CourtSetupView: View {
             imageCorners: corners,
             ownColor: ownColor,
             ownSamplePoint: ownPoint,
-            ownAttacksRight: ownAttacksRight
+            ownAttacksRight: ownAttacksRight,
+            roster: roster.isEmpty ? nil : roster
         )
+    }
+    
+    private var roster: [RosterEntry] {
+        RosterEntry.parse(rosterText)
     }
 
     private var geometry: CourtGeometry? {
@@ -81,6 +88,7 @@ struct CourtSetupView: View {
                     Divider()
                     courtSettings
                     teamSettings
+                    rosterSettings
                 }
                 .padding()
             }
@@ -285,6 +293,25 @@ struct CourtSetupView: View {
         }
     }
 
+    private var rosterSettings: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("自チームの背番号（任意）")
+                .font(.headline)
+            
+            TextField("10 田中\n7 佐藤", text: $rosterText, axis: .vertical)
+                .lineLimit(3...8)
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(.default)
+                .autocorrectionDisabled()
+            
+            Text(roster.isEmpty
+                 ? "1行に「背番号 名前」を入力します。入力すると、背番号の読み取りをこの番号に絞り、選手別のアドバイスに名前を表示します。"
+                 : "\(roster.count) 人: " + roster.map { "#\($0.number)" }.joined(separator: " "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+    
     // MARK: - Helpers
 
     private func marker(text: String, color: Color) -> some View {

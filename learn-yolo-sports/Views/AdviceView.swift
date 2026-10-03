@@ -62,7 +62,8 @@ struct AdviceView: View {
             adviceSections(
                 summary: partial.summary,
                 observations: partial.observations ?? [],
-                suggestions: partial.suggestions ?? []
+                suggestions: partial.suggestions ?? [],
+                playerAdvice: partial.playerAdvice ?? []
             )
         } else if advisor.isGenerating {
             HStack {
@@ -74,7 +75,8 @@ struct AdviceView: View {
             adviceSections(
                 summary: advice.summary,
                 observations: advice.observations,
-                suggestions: advice.suggestions
+                suggestions: advice.suggestions,
+                playerAdvice: advice.playerAdvice ?? []
             )
             
             Text("生成日時: \(advice.generatedAt.formatted(date: .abbreviated, time: .shortened))")
@@ -111,7 +113,7 @@ struct AdviceView: View {
             .foregroundStyle(.secondary)
     }
     
-    private func adviceSections(summary: String?, observations: [String], suggestions: [String]) -> some View {
+    private func adviceSections(summary: String?, observations: [String], suggestions: [String], playerAdvice: [String]) -> some View {
         VStack(alignment: .leading, spacing: 20) {
             if let summary, !summary.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -127,6 +129,10 @@ struct AdviceView: View {
             
             if !suggestions.isEmpty {
                 bulletSection(title: "次に取り組むこと", systemImage: "lightbulb", items: suggestions)
+            }
+            
+            if !playerAdvice.isEmpty {
+                bulletSection(title: "選手へのアドバイス", systemImage: "person.fill", items: playerAdvice)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

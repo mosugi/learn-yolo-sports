@@ -167,8 +167,8 @@ class VideoAnalysisViewModel {
             setup: setup,
             referenceImage: setupImage,
             outputDirectory: store.directoryURL(for: recordID),
-            // 画像は 1 秒に 2 枚程度だけ保存する
-            imageInterval: max(1, settings.framesPerSecond / 2)
+            // 画像は 1 秒に 2 枚程度、長い区間では合計 600 枚程度までに抑える
+            imageInterval: max(max(1, settings.framesPerSecond / 2), totalFrames / 600)
         )
 
         let session = ContinuedProcessingSession { [weak self] in
@@ -207,11 +207,19 @@ class VideoAnalysisViewModel {
             session.update(fraction: analysisProgress, subtitle: "戦術分析")
 
             let fps = settings.framesPerSecond
-            let analysis = await Task.detached(priority: .userInitiated) { () -> (result: MatchAnalysisResult, report: CoachReport)? in
+            let analysis = await Task.detached(priority: .userInitiated) { () -> (result: MatchAnalysisResult, report: CoachReport, chapters: [MatchChapter])? in
                 guard let setup else { return nil }
                 let result = MatchAnalyzer.analyze(frames: frames, setup: setup)
-                return (result, CoachRules.report(analysis: result, setup: setup, framesPerSecond: fps))
+                let report = CoachRules.report(analysis: result, setup: setup, framesPerSecond: fps)
+                let chapters = GoalDetector.chapters(
+                    states: result.states,
+                    changes: result.possessionChanges,
+                    setup: setup,
+                    trackNumbers: result.trackNumbers
+                )
+                return (result, report, chapters)
             }.value
+            let states = analysis?.result.statesByFrameIndex ?? [:]
 
             try Task.checkCancellation()
 
@@ -224,14 +232,18 @@ class VideoAnalysisViewModel {
                 imageHeight: Int(imageSize.height),
                 processingDuration: Date().timeIntervalSince(startTime),
                 usedRealModel: isUsingRealModel ?? false,
-                frames: frames.map { SavedFrame(processed: $0, assignments: analysis?.result.assignments[$0.index]) },
+                frames: frames.map {
+                    SavedFrame(processed: $0, assignments: analysis?.result.assignments[$0.index], state: states[$0.index])
+                },
                 setup: setup,
-                coachReport: analysis?.report
+                coachReport: analysis?.report,
+                chapters: analysis?.chapters,
+                trackNumbers: analysis?.result.trackNumbers
             )
 
             print("✅ 解析完了: \(frames.count)フレーム、\(String(format: "%.1f", record.processingDuration))秒")
-            if let report = analysis?.report {
-                print("📋 解説する場面: \(report.scenes.count)件")
+            if let analysis {
+                print("📋 解説する場面: \(analysis.report.scenes.count)件、得点シーン: \(analysis.chapters.count)件、背番号を特定した追跡: \(analysis.result.trackNumbers.count)件")
             }
 
             do {

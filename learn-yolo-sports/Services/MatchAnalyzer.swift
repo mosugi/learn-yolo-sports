@@ -56,6 +56,15 @@ nonisolated struct MatchAnalysisResult {
     let opponentColor: LabColor?
     /// カメラが動いたため除外したフレーム数
     let cameraMovedFrameCount: Int
+    /// states と同じ順の ProcessedFrame.index
+    let stateFrameIndices: [Int]
+    /// 追跡 ID ごとの背番号（読み取りの多数決で決まったもの）
+    let trackNumbers: [Int: Int]
+
+    /// ProcessedFrame.index に対応する状態
+    var statesByFrameIndex: [Int: FrameState] {
+        Dictionary(zip(stateFrameIndices, states), uniquingKeysWith: { a, _ in a })
+    }
 }
 
 /// 検出結果からチーム分類・追跡・ボール保持・局面を求める
@@ -71,6 +80,8 @@ nonisolated enum MatchAnalyzer {
     static let looseBallTime = 2.0
     /// 切り替え局面とみなす時間（秒）
     static let transitionDuration = 3.0
+    /// 途切れた追跡をつなぎ直す最大の間隔（秒）
+    static let maxStitchGap = 3.0
 
     static func analyze(frames: [ProcessedFrame], setup: AnalysisSetup) -> MatchAnalysisResult {
         let valid = frames.filter { !$0.cameraMoved }.sorted { $0.timestamp < $1.timestamp }
@@ -87,7 +98,8 @@ nonisolated enum MatchAnalyzer {
                         detectionIndex: index,
                         position: position,
                         color: detection.jerseyColor,
-                        isGoalkeeper: detection.sportsClass == .goalkeeper
+                        isGoalkeeper: detection.sportsClass == .goalkeeper,
+                        jerseyNumber: detection.jerseyNumber
                     ))
                 default:
                     continue
@@ -114,8 +126,22 @@ nonisolated enum MatchAnalyzer {
                     case nil: break
                     }
                 }
+                if let number = observation.jerseyNumber {
+                    tracks[index].numberVotes[number, default: 0] += 1
+                }
             }
+        }
+
+        // 途切れた追跡を、位置・チーム・背番号が矛盾しない範囲でつなぎ直す
+        tracks = stitch(tracks)
+        for index in tracks.indices {
             tracks[index].team = resolvedTeam(of: tracks[index], setup: setup)
+        }
+        var trackNumbers: [Int: Int] = [:]
+        for track in tracks where track.team == .own {
+            if let number = track.jerseyNumber {
+                trackNumbers[track.id] = number
+            }
         }
 
         // 4. フレームごとの配置（短い欠損は補間する）
@@ -246,7 +272,9 @@ nonisolated enum MatchAnalyzer {
             states: states,
             possessionChanges: changes,
             opponentColor: centroids.opponent,
-            cameraMovedFrameCount: frames.count - valid.count
+            cameraMovedFrameCount: frames.count - valid.count,
+            stateFrameIndices: valid.map(\.index),
+            trackNumbers: trackNumbers
         )
     }
 
@@ -314,6 +342,7 @@ nonisolated enum MatchAnalyzer {
         let position: CGPoint
         let color: LabColor?
         let isGoalkeeper: Bool
+        let jerseyNumber: Int?
     }
 
     nonisolated struct TrackPoint {
@@ -333,9 +362,82 @@ nonisolated enum MatchAnalyzer {
         var ownVotes = 0
         var opponentVotes = 0
         var goalkeeperCount = 0
+        var numberVotes: [Int: Int] = [:]
         var team: TeamSide?
 
+        var first: TrackPoint { points[0] }
         var last: TrackPoint { points[points.count - 1] }
+
+        /// 色の多数決によるチーム（GK を除く）
+        var colorTeam: TeamSide? {
+            if ownVotes > opponentVotes { return .own }
+            if opponentVotes > ownVotes { return .opponent }
+            return nil
+        }
+
+        /// 読み取りの過半数を占める背番号（2回以上読めたもの）
+        var jerseyNumber: Int? {
+            let total = numberVotes.values.reduce(0, +)
+            guard let best = numberVotes.max(by: { $0.value < $1.value }),
+                  best.value >= 2, Double(best.value) / Double(total) >= 0.6 else { return nil }
+            return best.key
+        }
+    }
+
+    /// 追跡が途切れた後に始まった追跡のうち、つながりうるものを1本にまとめる
+    static func stitch(_ tracks: [Track]) -> [Track] {
+        var links: [(from: Int, to: Int, distance: Double)] = []
+        // 開始時刻順に並べ、終了直後に始まる追跡だけを調べる
+        let byStart = tracks.indices.sorted { tracks[$0].first.time < tracks[$1].first.time }
+        let startTimes = byStart.map { tracks[$0].first.time }
+        for (a, earlier) in tracks.enumerated() {
+            var lower = 0, upper = startTimes.count
+            while lower < upper {
+                let mid = (lower + upper) / 2
+                if startTimes[mid] <= earlier.last.time { lower = mid + 1 } else { upper = mid }
+            }
+            for k in lower..<startTimes.count {
+                let gap = startTimes[k] - earlier.last.time
+                guard gap <= maxStitchGap else { break }
+                let b = byStart[k]
+                let later = tracks[b]
+                guard gap > 0, a != b else { continue }
+                let d = distance(earlier.last.position, later.first.position)
+                guard d <= 2 + 7 * gap else { continue }
+                // チームと背番号が食い違うものはつながない
+                if let x = earlier.colorTeam, let y = later.colorTeam, x != y { continue }
+                if let x = earlier.jerseyNumber, let y = later.jerseyNumber, x != y { continue }
+                let earlierIsKeeper = earlier.goalkeeperCount * 2 > earlier.points.count
+                let laterIsKeeper = later.goalkeeperCount * 2 > later.points.count
+                if earlierIsKeeper != laterIsKeeper { continue }
+                links.append((a, b, d))
+            }
+        }
+        links.sort { $0.distance < $1.distance }
+
+        var next: [Int: Int] = [:]
+        var previous: [Int: Int] = [:]
+        for link in links where next[link.from] == nil && previous[link.to] == nil {
+            next[link.from] = link.to
+            previous[link.to] = link.from
+        }
+
+        var merged: [Track] = []
+        for start in tracks.indices where previous[start] == nil {
+            var track = Track(id: merged.count, points: [])
+            var current: Int? = start
+            while let index = current {
+                let part = tracks[index]
+                track.points += part.points
+                track.ownVotes += part.ownVotes
+                track.opponentVotes += part.opponentVotes
+                track.goalkeeperCount += part.goalkeeperCount
+                track.numberVotes.merge(part.numberVotes, uniquingKeysWith: +)
+                current = next[index]
+            }
+            merged.append(track)
+        }
+        return merged
     }
 
     /// 等速の予測と距離による貪欲な対応付けで、フレーム間の同一人物を結ぶ

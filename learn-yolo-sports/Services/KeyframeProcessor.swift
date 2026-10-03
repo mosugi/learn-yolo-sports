@@ -30,6 +30,8 @@ nonisolated struct ProcessedDetection {
     let inCourt: Bool?
     /// ユニフォームの色（選手・GK のみ）
     let jerseyColor: LabColor?
+    /// 読み取れた背番号（自チームらしい選手のみ）
+    var jerseyNumber: Int? = nil
 
     var sportsClass: SportsClass? {
         SportsClass(rawValue: label)
@@ -57,6 +59,10 @@ actor KeyframeProcessor {
     /// 基準画像との位置ずれがこれを超えたらカメラが動いたとみなす（画像幅に対する割合）
     private static let cameraMovementThreshold = 0.02
     private static let thumbnailDimension = 320
+    /// 1フレームで背番号を読み取る最大人数（処理時間を抑えるため大きく写る選手から）
+    private static let maxNumberReadsPerFrame = 4
+    /// 背番号を読み取る最小の選手の高さ（ピクセル）
+    private static let minimumHeightForNumber: CGFloat = 60
 
     init(detector: YOLODetector, setup: AnalysisSetup?, referenceImage: CGImage?, outputDirectory: URL, imageInterval: Int) {
         self.detector = detector
@@ -104,7 +110,7 @@ actor KeyframeProcessor {
         let cameraMoved = hasCameraMoved(image)
         let pixels = setup == nil ? nil : PixelImage(image: image)
 
-        let detections = rawDetections.map { detection -> ProcessedDetection in
+        var detections = rawDetections.map { detection -> ProcessedDetection in
             // 切り出し画像のピクセル座標 → 元画像の正規化座標
             let box = detection.boundingBox
             let normalized = CGRect(
@@ -146,6 +152,11 @@ actor KeyframeProcessor {
             )
         }
 
+        // 背番号の読み取りは 1 秒に 2 回程度に抑える
+        if let setup, !cameraMoved, index % imageInterval == 0 {
+            readJerseyNumbers(in: image, detections: &detections, setup: setup)
+        }
+
         var imageFileName: String?
         if index % imageInterval == 0 {
             let fileName = AnalysisStore.imageFileName(for: index)
@@ -184,5 +195,81 @@ actor KeyframeProcessor {
         let transform = observation.alignmentTransform
         let shift = hypot(Double(transform.tx), Double(transform.ty)) / Double(referenceImage.width)
         return shift > Self.cameraMovementThreshold
+    }
+
+    // MARK: - Jersey numbers
+
+    /// 自チームらしい選手の背中の番号を読み取る
+    private func readJerseyNumbers(in image: CGImage, detections: inout [ProcessedDetection], setup: AnalysisSetup) {
+        let imageHeight = CGFloat(image.height)
+        let allowed = Set(setup.rosterEntries.map(\.number))
+        let candidates = detections.indices
+            .filter { index in
+                let detection = detections[index]
+                guard detection.sportsClass == .player, detection.inCourt == true,
+                      let color = detection.jerseyColor, color.distance(to: setup.ownColor) < 35 else { return false }
+                return detection.boundingBox.height * imageHeight >= Self.minimumHeightForNumber
+            }
+            .sorted { detections[$0].boundingBox.height > detections[$1].boundingBox.height }
+            .prefix(Self.maxNumberReadsPerFrame)
+
+        for index in candidates {
+            guard let crop = Self.numberRegion(of: detections[index].boundingBox, in: image) else { continue }
+            detections[index].jerseyNumber = Self.recognizeNumber(in: crop, allowed: allowed)
+        }
+    }
+
+    /// 背番号が写る胴体部分を切り出し、文字認識しやすい大きさに拡大する
+    private static func numberRegion(of box: CGRect, in image: CGImage) -> CGImage? {
+        let width = CGFloat(image.width), height = CGFloat(image.height)
+        let rect = CGRect(
+            x: (box.minX + box.width * 0.1) * width,
+            y: (box.minY + box.height * 0.12) * height,
+            width: box.width * 0.8 * width,
+            height: box.height * 0.45 * height
+        ).integral
+        guard rect.width >= 8, rect.height >= 8, let crop = image.cropping(to: rect) else { return nil }
+
+        let targetHeight = 160
+        guard crop.height < targetHeight else { return crop }
+        let scale = Double(targetHeight) / Double(crop.height)
+        let targetWidth = max(1, Int(Double(crop.width) * scale))
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: nil,
+                width: targetWidth,
+                height: targetHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return crop }
+        context.interpolationQuality = .high
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        return context.makeImage() ?? crop
+    }
+
+    /// 1〜2桁の数字だけを背番号として受け付ける
+    private static func recognizeNumber(in image: CGImage, allowed: Set<Int>) -> Int? {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            return nil
+        }
+        for observation in request.results ?? [] {
+            for candidate in observation.topCandidates(3) where candidate.confidence >= 0.4 {
+                let text = candidate.string.trimmingCharacters(in: .whitespaces)
+                guard (1...2).contains(text.count),
+                      text.allSatisfy({ $0.isASCII && $0.isNumber }),
+                      let number = Int(text) else { continue }
+                if !allowed.isEmpty && !allowed.contains(number) { continue }
+                return number
+            }
+        }
+        return nil
     }
 }
