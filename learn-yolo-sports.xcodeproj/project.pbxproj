@@ -254,6 +254,7 @@
 				DEVELOPMENT_TEAM = LHSVZBJ4CR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "learn-yolo-sports-Info.plist";
 				INFOPLIST_KEY_NSCameraUsageDescription = "スポーツ動画を撮影して解析するためにカメラにアクセスします";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声付き動画を撮影するためにマイクにアクセスします";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "スポーツ動画を解析するためにフォトライブラリにアクセスします";
@@ -289,6 +290,7 @@
 				DEVELOPMENT_TEAM = LHSVZBJ4CR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "learn-yolo-sports-Info.plist";
 				INFOPLIST_KEY_NSCameraUsageDescription = "スポーツ動画を撮影して解析するためにカメラにアクセスします";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声付き動画を撮影するためにマイクにアクセスします";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "スポーツ動画を解析するためにフォトライブラリにアクセスします";

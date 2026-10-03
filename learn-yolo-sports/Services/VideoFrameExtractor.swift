@@ -13,7 +13,7 @@ import UIKit
 actor VideoFrameExtractor {
     
     /// フレーム抽出の進捗を通知するクロージャ
-    typealias ProgressHandler = (Int, Int) -> Void
+    typealias ProgressHandler = @Sendable (Int, Int) async -> Void
     
     /// 動画URLからフレームを抽出
     /// - Parameters:
@@ -62,6 +62,7 @@ actor VideoFrameExtractor {
         
         reader.add(output)
         reader.startReading()
+        defer { reader.cancelReading() }
         
         var frames: [CGImage] = []
         var frameCount = 0
@@ -69,6 +70,7 @@ actor VideoFrameExtractor {
         
         // フレームを抽出
         while let sampleBuffer = output.copyNextSampleBuffer() {
+            try Task.checkCancellation()
             
             // フレーム間隔をチェック
             if frameCount % frameInterval == 0 {
@@ -77,7 +79,7 @@ actor VideoFrameExtractor {
                     frames.append(cgImage)
                     
                     // 進捗を通知
-                    progressHandler?(frames.count, maxFrames)
+                    await progressHandler?(frames.count, maxFrames)
                     
                     print("🎬 フレーム抽出: \(frames.count)/\(maxFrames)")
                     
@@ -90,8 +92,6 @@ actor VideoFrameExtractor {
             
             frameCount += 1
         }
-        
-        reader.cancelReading()
         
         print("✅ フレーム抽出完了: \(frames.count)フレーム")
         

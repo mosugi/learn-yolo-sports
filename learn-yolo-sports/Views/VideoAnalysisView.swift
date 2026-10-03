@@ -9,7 +9,7 @@ import SwiftUI
 import PhotosUI
 
 struct VideoAnalysisView: View {
-    @State private var viewModel = VideoAnalysisViewModel()
+    @Environment(VideoAnalysisViewModel.self) private var viewModel
     @State private var selectedVideoItem: PhotosPickerItem?
     @State private var showingSettings = false
     @State private var framesPerSecond = 2
@@ -22,16 +22,11 @@ struct VideoAnalysisView: View {
                     // 解析結果表示
                     analysisResultView
                 } else if viewModel.videoURL != nil {
-                    // 動画選択済み、解析待ち
+                    // 動画選択済み（解析待ち・解析中）
                     analysisSetupView
                 } else {
                     // 動画未選択
                     videoPickerView
-                }
-                
-                // 解析中のオーバーレイ
-                if viewModel.isAnalyzing {
-                    analyzingOverlay
                 }
             }
             .navigationTitle("スポーツ動画解析")
@@ -153,34 +148,49 @@ struct VideoAnalysisView: View {
                     }
                 }
                 
-                Button {
-                    Task {
-                        await viewModel.analyzeVideo(
-                            url: url,
-                            framesPerSecond: framesPerSecond,
-                            maxFrames: maxFrames
-                        )
+                if viewModel.isAnalyzing {
+                    analysisProgressCard
+                        .padding(.horizontal, 40)
+                } else {
+                    if let errorMessage = viewModel.errorMessage {
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
                     }
-                } label: {
-                    Label("解析開始", systemImage: "play.fill")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(
-                            LinearGradient(
-                                colors: [.green, .blue],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .foregroundStyle(.white)
-                        .cornerRadius(12)
+                    
+                    startButton(url: url)
                 }
-                .padding(.horizontal, 40)
             }
             
             Spacer()
         }
+    }
+    
+    private func startButton(url: URL) -> some View {
+        Button {
+            viewModel.startAnalysis(
+                url: url,
+                framesPerSecond: framesPerSecond,
+                maxFrames: maxFrames
+            )
+        } label: {
+            Label("解析開始", systemImage: "play.fill")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(
+                    LinearGradient(
+                        colors: [.green, .blue],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .foregroundStyle(.white)
+                .cornerRadius(12)
+        }
+        .padding(.horizontal, 40)
     }
     
     // MARK: - Analysis Result View
@@ -296,47 +306,44 @@ struct VideoAnalysisView: View {
         }
     }
     
-    // MARK: - Analyzing Overlay
+    // MARK: - Analysis Progress
     
-    private var analyzingOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.7)
-                .ignoresSafeArea()
-            
-            VStack(spacing: 20) {
+    /// 解析中の進捗（操作をブロックしない）
+    private var analysisProgressCard: some View {
+        VStack(spacing: 12) {
+            HStack {
                 ProgressView()
-                    .scaleEffect(1.5)
-                    .tint(.white)
-                
-                VStack(spacing: 10) {
-                    Text("解析中...")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                    
-                    Text("フレーム \(viewModel.currentFrame) / \(viewModel.totalFrames)")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.8))
-                    
-                    ProgressView(value: viewModel.analysisProgress)
-                        .progressViewStyle(.linear)
-                        .frame(width: 200)
-                        .tint(.white)
-                    
-                    Text("\(Int(viewModel.analysisProgress * 100))%")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-                
-                Button("キャンセル") {
+                Text("解析中...")
+                    .font(.headline)
+                Spacer()
+                Text("\(Int(viewModel.analysisProgress * 100))%")
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            
+            ProgressView(value: viewModel.analysisProgress)
+                .progressViewStyle(.linear)
+            
+            HStack {
+                Text("フレーム \(viewModel.currentFrame) / \(viewModel.totalFrames)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("キャンセル", role: .cancel) {
                     viewModel.cancelAnalysis()
                 }
-                .foregroundStyle(.white)
-                .padding(.top, 10)
+                .font(.caption)
             }
-            .padding(30)
-            .background(.ultraThinMaterial)
-            .cornerRadius(20)
+            
+            Text("他のタブへの移動やアプリを閉じても解析は続きます")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
     }
     
     // MARK: - Settings Sheet
@@ -414,4 +421,5 @@ struct StatView: View {
 
 #Preview {
     VideoAnalysisView()
+        .environment(VideoAnalysisViewModel())
 }
