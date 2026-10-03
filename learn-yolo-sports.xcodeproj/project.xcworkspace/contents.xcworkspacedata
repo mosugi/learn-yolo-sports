@@ -4,4 +4,31 @@
    <FileRef
       location = "self:">
    </FileRef>
+   <FileRef
+      location = "group:VideoPickerView 2.swift">
+   </FileRef>
+   <FileRef
+      location = "group:VideoPlayerView 2.swift">
+   </FileRef>
+   <FileRef
+      location = "group:Info.plist">
+   </FileRef>
+   <FileRef
+      location = "group:DetectionModels.swift">
+   </FileRef>
+   <FileRef
+      location = "group:VideoFrameExtractor.swift">
+   </FileRef>
+   <FileRef
+      location = "group:YOLODetector.swift">
+   </FileRef>
+   <FileRef
+      location = "group:DetectionOverlayView.swift">
+   </FileRef>
+   <FileRef
+      location = "group:VideoAnalysisViewModel.swift">
+   </FileRef>
+   <FileRef
+      location = "group:VideoAnalysisView.swift">
+   </FileRef>
 </Workspace>
