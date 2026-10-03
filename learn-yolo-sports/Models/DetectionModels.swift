@@ -70,33 +70,3 @@ nonisolated struct FrameDetectionResult: Identifiable {
             .mapValues { $0.count }
     }
 }
-
-/// 動画全体の解析結果
-nonisolated struct VideoAnalysisResult {
-    let totalFrames: Int
-    let processedFrames: Int
-    let detectionResults: [FrameDetectionResult]
-    let duration: TimeInterval
-    
-    /// 全フレームでの検出総数
-    var totalDetections: Int {
-        detectionResults.reduce(0) { $0 + $1.totalDetections }
-    }
-    
-    /// 平均検出数
-    var averageDetectionsPerFrame: Double {
-        guard processedFrames > 0 else { return 0 }
-        return Double(totalDetections) / Double(processedFrames)
-    }
-    
-    /// クラスごとの出現頻度
-    var classFrequency: [String: Int] {
-        var frequency: [String: Int] = [:]
-        for result in detectionResults {
-            for detection in result.detections {
-                frequency[detection.label, default: 0] += 1
-            }
-        }
-        return frequency
-    }
-}

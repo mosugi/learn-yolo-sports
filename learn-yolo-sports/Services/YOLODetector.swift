@@ -39,7 +39,8 @@ actor YOLODetector {
 
         do {
             let config = MLModelConfiguration()
-            config.computeUnits = .all
+            // バックグラウンド継続中は GPU を使えないため、CPU と Neural Engine に限定する
+            config.computeUnits = .cpuAndNeuralEngine
             let mlModel = try MLModel(contentsOf: url, configuration: config)
             self.model = try VNCoreMLModel(for: mlModel)
             print("✅ YOLOモデル読み込み完了: \(Self.modelName)")

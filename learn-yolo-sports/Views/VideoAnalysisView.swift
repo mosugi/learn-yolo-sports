@@ -9,7 +9,8 @@ import SwiftUI
 import PhotosUI
 
 struct VideoAnalysisView: View {
-    @State private var viewModel = VideoAnalysisViewModel()
+    @Environment(VideoAnalysisViewModel.self) private var viewModel
+    @Environment(AnalysisStore.self) private var store
     @State private var selectedVideoItem: PhotosPickerItem?
     @State private var showingSettings = false
     @State private var framesPerSecond = 2
@@ -22,16 +23,11 @@ struct VideoAnalysisView: View {
                     // 解析結果表示
                     analysisResultView
                 } else if viewModel.videoURL != nil {
-                    // 動画選択済み、解析待ち
+                    // 動画選択済み（解析待ち・解析中）
                     analysisSetupView
                 } else {
                     // 動画未選択
                     videoPickerView
-                }
-                
-                // 解析中のオーバーレイ
-                if viewModel.isAnalyzing {
-                    analyzingOverlay
                 }
             }
             .navigationTitle("スポーツ動画解析")
@@ -153,190 +149,105 @@ struct VideoAnalysisView: View {
                     }
                 }
                 
-                Button {
-                    Task {
-                        await viewModel.analyzeVideo(
-                            url: url,
-                            framesPerSecond: framesPerSecond,
-                            maxFrames: maxFrames
-                        )
+                if viewModel.isAnalyzing {
+                    analysisProgressCard
+                        .padding(.horizontal, 40)
+                } else {
+                    if let errorMessage = viewModel.errorMessage {
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
                     }
-                } label: {
-                    Label("解析開始", systemImage: "play.fill")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(
-                            LinearGradient(
-                                colors: [.green, .blue],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .foregroundStyle(.white)
-                        .cornerRadius(12)
+                    
+                    startButton(url: url)
                 }
-                .padding(.horizontal, 40)
             }
             
             Spacer()
         }
     }
     
+    private func startButton(url: URL) -> some View {
+        Button {
+            viewModel.startAnalysis(
+                url: url,
+                framesPerSecond: framesPerSecond,
+                maxFrames: maxFrames
+            )
+        } label: {
+            Label("解析開始", systemImage: "play.fill")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(
+                    LinearGradient(
+                        colors: [.green, .blue],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .foregroundStyle(.white)
+                .cornerRadius(12)
+        }
+        .padding(.horizontal, 40)
+    }
+    
     // MARK: - Analysis Result View
     
+    @ViewBuilder
     private var analysisResultView: some View {
-        VStack(spacing: 0) {
-            // 検出結果画像
-            if let frameResult = viewModel.selectedFrameResult,
-               let image = frameResult.image {
-                
-                GeometryReader { geometry in
-                    ZStack {
-                        Image(uiImage: UIImage(cgImage: image))
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: geometry.size.width, height: geometry.size.height)
-                        
-                        DetectionOverlayView(
-                            detections: frameResult.detections,
-                            imageSize: CGSize(width: image.width, height: image.height),
-                            displaySize: geometry.size
-                        )
-                    }
-                }
-                .background(Color.black)
-                .frame(height: 300)
-                
-                // フレーム情報
-                VStack(spacing: 5) {
-                    Text("フレーム \(viewModel.selectedFrameIndex + 1) / \(viewModel.totalFrames)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    
-                    Text("\(frameResult.detections.count) 個検出")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                }
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity)
-                .background(Color(.systemBackground))
-                
-                // フレームスライダー
-                HStack {
-                    Button {
-                        viewModel.previousFrame()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .frame(width: 44, height: 44)
-                    }
-                    .disabled(viewModel.selectedFrameIndex == 0)
-                    
-                    Slider(
-                        value: Binding(
-                            get: { Double(viewModel.selectedFrameIndex) },
-                            set: { viewModel.selectedFrameIndex = Int($0) }
-                        ),
-                        in: 0...Double(max(0, viewModel.detectionResults.count - 1)),
-                        step: 1
-                    )
-                    
-                    Button {
-                        viewModel.nextFrame()
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .frame(width: 44, height: 44)
-                    }
-                    .disabled(viewModel.selectedFrameIndex >= viewModel.detectionResults.count - 1)
-                }
-                .padding(.horizontal)
-                
-                Divider()
-                
-                // 検出リスト
-                if !frameResult.detections.isEmpty {
-                    DetectionListView(detections: frameResult.detections)
-                } else {
-                    ContentUnavailableView(
-                        "検出なし",
-                        systemImage: "magnifyingglass",
-                        description: Text("このフレームでは何も検出されませんでした")
-                    )
-                }
-                
-                // 統計情報
-                if let result = viewModel.analysisResult {
-                    VStack(spacing: 10) {
-                        Divider()
-                        
-                        HStack(spacing: 20) {
-                            StatView(
-                                title: "総検出数",
-                                value: "\(result.totalDetections)",
-                                icon: "scope"
-                            )
-                            
-                            StatView(
-                                title: "平均",
-                                value: String(format: "%.1f", result.averageDetectionsPerFrame),
-                                icon: "chart.bar"
-                            )
-                            
-                            StatView(
-                                title: "処理時間",
-                                value: String(format: "%.1fs", result.duration),
-                                icon: "clock"
-                            )
-                        }
-                        .padding()
-                    }
-                    .background(Color(.secondarySystemBackground))
-                }
-            }
+        if let id = viewModel.currentRecordID, let record = store.record(for: id) {
+            AnalysisResultView(record: record, frames: viewModel.detectionResults)
+                .id(id)
+        } else if let errorMessage = viewModel.errorMessage {
+            ContentUnavailableView(
+                "結果を表示できません",
+                systemImage: "exclamationmark.triangle",
+                description: Text(errorMessage)
+            )
         }
     }
     
-    // MARK: - Analyzing Overlay
+    // MARK: - Analysis Progress
     
-    private var analyzingOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.7)
-                .ignoresSafeArea()
-            
-            VStack(spacing: 20) {
+    /// 解析中の進捗（操作をブロックしない）
+    private var analysisProgressCard: some View {
+        VStack(spacing: 12) {
+            HStack {
                 ProgressView()
-                    .scaleEffect(1.5)
-                    .tint(.white)
-                
-                VStack(spacing: 10) {
-                    Text("解析中...")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                    
-                    Text("フレーム \(viewModel.currentFrame) / \(viewModel.totalFrames)")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.8))
-                    
-                    ProgressView(value: viewModel.analysisProgress)
-                        .progressViewStyle(.linear)
-                        .frame(width: 200)
-                        .tint(.white)
-                    
-                    Text("\(Int(viewModel.analysisProgress * 100))%")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-                
-                Button("キャンセル") {
+                Text("解析中（\(viewModel.phase.label)）")
+                    .font(.headline)
+                Spacer()
+                Text("\(Int(viewModel.analysisProgress * 100))%")
+                    .font(.subheadline)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            
+            ProgressView(value: viewModel.analysisProgress)
+                .progressViewStyle(.linear)
+            
+            HStack {
+                Text("フレーム \(viewModel.currentFrame) / \(viewModel.totalFrames)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("キャンセル", role: .cancel) {
                     viewModel.cancelAnalysis()
                 }
-                .foregroundStyle(.white)
-                .padding(.top, 10)
+                .font(.caption)
             }
-            .padding(30)
-            .background(.ultraThinMaterial)
-            .cornerRadius(20)
+            
+            Text("他のタブへの移動やアプリを閉じても解析は続きます")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
     }
     
     // MARK: - Settings Sheet
@@ -387,31 +298,9 @@ struct VideoAnalysisView: View {
     }
 }
 
-// MARK: - Stat View
-
-struct StatView: View {
-    let title: String
-    let value: String
-    let icon: String
-    
-    var body: some View {
-        VStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(.blue)
-            
-            Text(value)
-                .font(.title3)
-                .fontWeight(.bold)
-            
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
 #Preview {
+    let store = AnalysisStore()
     VideoAnalysisView()
+        .environment(store)
+        .environment(VideoAnalysisViewModel(store: store))
 }
