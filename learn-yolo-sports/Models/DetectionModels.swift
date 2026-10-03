@@ -10,7 +10,7 @@ import CoreGraphics
 import SwiftUI
 
 /// 検出されたオブジェクト
-struct Detection: Identifiable {
+nonisolated struct Detection: Identifiable {
     let id = UUID()
     let label: String
     let confidence: Float
@@ -23,54 +23,36 @@ struct Detection: Identifiable {
     }
 }
 
-/// スポーツ関連のクラスラベル
-enum SportsClass: String, CaseIterable {
-    case person = "person"
-    case ball = "sports ball"
-    case baseball = "baseball bat"
-    case tennis = "tennis racket"
-    case skateboard = "skateboard"
-    case surfboard = "surfboard"
-    case skis = "skis"
-    case snowboard = "snowboard"
-    case frisbee = "frisbee"
-    case kite = "kite"
+/// サッカー検出モデルのクラスラベル（モデルの names と一致させる）
+nonisolated enum SportsClass: String, CaseIterable {
+    case ball = "ball"
+    case player = "player"
+    case referee = "referee"
+    case goalkeeper = "goalkeeper"
     
     /// クラスごとの色
     var color: Color {
         switch self {
-        case .person: return .blue
         case .ball: return .red
-        case .baseball: return .orange
-        case .tennis: return .green
-        case .skateboard: return .purple
-        case .surfboard: return .cyan
-        case .skis: return .yellow
-        case .snowboard: return .pink
-        case .frisbee: return .mint
-        case .kite: return .indigo
+        case .player: return .blue
+        case .referee: return .yellow
+        case .goalkeeper: return .green
         }
     }
     
     /// 日本語名
     var japaneseName: String {
         switch self {
-        case .person: return "人"
         case .ball: return "ボール"
-        case .baseball: return "バット"
-        case .tennis: return "ラケット"
-        case .skateboard: return "スケートボード"
-        case .surfboard: return "サーフボード"
-        case .skis: return "スキー"
-        case .snowboard: return "スノーボード"
-        case .frisbee: return "フリスビー"
-        case .kite: return "凧"
+        case .player: return "選手"
+        case .referee: return "審判"
+        case .goalkeeper: return "ゴールキーパー"
         }
     }
 }
 
 /// フレームの検出結果
-struct FrameDetectionResult: Identifiable {
+nonisolated struct FrameDetectionResult: Identifiable {
     let id = UUID()
     let frameNumber: Int
     let timestamp: Double
@@ -90,7 +72,7 @@ struct FrameDetectionResult: Identifiable {
 }
 
 /// 動画全体の解析結果
-struct VideoAnalysisResult {
+nonisolated struct VideoAnalysisResult {
     let totalFrames: Int
     let processedFrames: Int
     let detectionResults: [FrameDetectionResult]

@@ -58,6 +58,9 @@ struct VideoAnalysisView: View {
                     }
                 }
             }
+            .task {
+                await viewModel.checkModel()
+            }
             .sheet(isPresented: $showingSettings) {
                 settingsSheet
             }
@@ -89,7 +92,7 @@ struct VideoAnalysisView: View {
                     .font(.title)
                     .fontWeight(.bold)
                 
-                Text("YOLOで選手やボールを自動検出")
+                Text("YOLOで選手・審判・ボールを自動検出")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -139,6 +142,15 @@ struct VideoAnalysisView: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    
+                    if let isUsingRealModel = viewModel.isUsingRealModel {
+                        Label(
+                            isUsingRealModel ? "サッカー検出モデル" : "モックモード（モデル未配置）",
+                            systemImage: isUsingRealModel ? "cpu" : "exclamationmark.triangle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(isUsingRealModel ? .green : .orange)
+                    }
                 }
                 
                 Button {

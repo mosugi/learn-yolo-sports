@@ -149,7 +149,7 @@ struct VideoPickerView: View {
     }
     
     private func printVideoInfo(url: URL) async {
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         
         do {
             let duration = try await asset.load(.duration)
@@ -159,14 +159,11 @@ struct VideoPickerView: View {
             print("  - 長さ: \(CMTimeGetSeconds(duration)) 秒")
             print("  - トラック数: \(tracks.count)")
             
-            for track in tracks {
-                let mediaType = try await track.load(.mediaType)
-                if mediaType == .video {
-                    let size = try await track.load(.naturalSize)
-                    let fps = try await track.load(.nominalFrameRate)
-                    print("  - 解像度: \(Int(size.width)) x \(Int(size.height))")
-                    print("  - FPS: \(fps)")
-                }
+            for track in try await asset.loadTracks(withMediaType: .video) {
+                let size = try await track.load(.naturalSize)
+                let fps = try await track.load(.nominalFrameRate)
+                print("  - 解像度: \(Int(size.width)) x \(Int(size.height))")
+                print("  - FPS: \(fps)")
             }
         } catch {
             print("動画情報の取得に失敗: \(error)")

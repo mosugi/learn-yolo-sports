@@ -103,13 +103,13 @@ struct DetectionListView: View {
 #Preview("Overlay") {
     let mockDetections = [
         Detection(
-            label: "person",
+            label: "player",
             confidence: 0.92,
             boundingBox: CGRect(x: 100, y: 100, width: 200, height: 300),
             color: .blue
         ),
         Detection(
-            label: "sports ball",
+            label: "ball",
             confidence: 0.85,
             boundingBox: CGRect(x: 300, y: 200, width: 80, height: 80),
             color: .red
@@ -128,22 +128,22 @@ struct DetectionListView: View {
 #Preview("List") {
     let mockDetections = [
         Detection(
-            label: "person",
+            label: "player",
             confidence: 0.92,
             boundingBox: CGRect(x: 100, y: 100, width: 200, height: 300),
             color: .blue
         ),
         Detection(
-            label: "sports ball",
+            label: "ball",
             confidence: 0.85,
             boundingBox: CGRect(x: 300, y: 200, width: 80, height: 80),
             color: .red
         ),
         Detection(
-            label: "tennis racket",
+            label: "referee",
             confidence: 0.78,
             boundingBox: CGRect(x: 150, y: 250, width: 100, height: 150),
-            color: .green
+            color: .yellow
         )
     ]
     

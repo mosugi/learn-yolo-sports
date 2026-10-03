@@ -28,6 +28,9 @@ class VideoAnalysisViewModel {
     
     var analysisResult: VideoAnalysisResult?
     
+    /// 実モデルで動作しているか（nil: 未確認, false: モックモード）
+    var isUsingRealModel: Bool?
+    
     // MARK: - Computed Properties
     
     var selectedFrameResult: FrameDetectionResult? {
@@ -45,6 +48,11 @@ class VideoAnalysisViewModel {
     private let detector = YOLODetector()
     
     // MARK: - Methods
+    
+    /// モデルの読み込み状態を確認
+    func checkModel() async {
+        isUsingRealModel = await detector.isModelLoaded
+    }
     
     /// 動画を解析
     func analyzeVideo(url: URL, framesPerSecond: Int = 1, maxFrames: Int = 30) async {

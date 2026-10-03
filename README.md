@@ -1,6 +1,6 @@
-# 🏀 Sports Video Analyzer with YOLO
+# ⚽️ Sports Video Analyzer with YOLO
 
-スポーツ動画をYOLOで解析するiOSアプリ
+サッカー動画をYOLOで解析するiOSアプリ
 
 ## ✨ 機能
 
@@ -12,13 +12,11 @@
 ### 2. YOLO物体検出
 - 動画からフレームを自動抽出
 - 各フレームでYOLO物体検出
-- スポーツ関連オブジェクトの検出:
-  - 👤 人
+- サッカー用YOLOモデルで以下を検出:
   - ⚽️ ボール
-  - 🎾 テニスラケット
-  - ⚾️ バット
-  - 🏂 スケートボード、サーフボード、スノーボード
-  - その他
+  - 🏃 選手
+  - 🧑‍⚖️ 審判
+  - 🧤 ゴールキーパー
 
 ### 3. 結果表示
 - バウンディングボックスのオーバーレイ表示
@@ -37,6 +35,7 @@
 
 ```
 learn-yolo-sports/
+├── learn_yolo_sportsApp.swift         # エントリーポイント
 ├── Models/
 │   └── DetectionModels.swift          # データモデル
 ├── Services/
@@ -51,16 +50,27 @@ learn-yolo-sports/
 │   └── InfoView.swift                 # アプリ情報
 ├── ViewModels/
 │   └── VideoAnalysisViewModel.swift   # 解析ロジック
-└── Info.plist                         # アプリ権限設定
+└── MLModels/
+    └── FootballPlayerDetector.mlpackage  # setup_model.sh で生成（git 管理外）
+scripts/
+└── setup_model.sh                     # モデルのダウンロードと Core ML 変換
+docs/
+├── YOLO_SETUP_GUIDE.md                # YOLOモデルのセットアップ詳細
+└── BUILD_CHECKLIST.md                 # ビルド・稼働確認チェックリスト
 ```
 
 ## 🚀 使い方
 
 ### 1. セットアップ
 
-1. Xcodeでプロジェクトを開く
-2. Info.plistがプロジェクトに追加されていることを確認
+1. YOLOモデルを用意する（[uv](https://docs.astral.sh/uv/) が必要）
+   ```bash
+   ./scripts/setup_model.sh
+   ```
+2. Xcodeでプロジェクトを開く
 3. ビルド&実行 (⌘R)
+
+モデルを配置しなくてもビルドは通り、その場合はランダムな検出結果を返すモックモードで動作します。詳しくは [docs/YOLO_SETUP_GUIDE.md](docs/YOLO_SETUP_GUIDE.md) を参照してください。
 
 ### 2. 動画解析
 
@@ -88,7 +98,7 @@ learn-yolo-sports/
 
 ## 📱 必要な権限
 
-Info.plistに以下の権限が設定されています:
+プロジェクトのビルド設定（`INFOPLIST_KEY_*`）で以下の権限を設定しています:
 
 - **NSPhotoLibraryUsageDescription**: フォトライブラリアクセス
 - **NSCameraUsageDescription**: カメラアクセス（将来の機能用）
@@ -96,52 +106,18 @@ Info.plistに以下の権限が設定されています:
 
 ## 🤖 YOLOモデルについて
 
-現在、このアプリは**モックモード**で動作しています。実際のYOLO検出を行うには:
+[mobadam/football-player-detection](https://huggingface.co/mobadam/football-player-detection)（YOLO26l, Apache-2.0）を使用しています。サッカー中継映像で学習されたモデルです。
 
-### Core MLモデルの追加
-
-1. **YOLOv8モデルを取得**
-   - [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics)
-   - または [Roboflow](https://roboflow.com/) でカスタムモデルを作成
-
-2. **Core ML形式に変換**
-   ```bash
-   pip install ultralytics
-   yolo export model=yolov8n.pt format=coreml
-   ```
-
-3. **Xcodeに追加**
-   - `.mlmodel` ファイルをプロジェクトにドラッグ&ドロップ
-   - ターゲットメンバーシップを確認
-
-4. **YOLODetector.swift を更新**
-   ```swift
-   private func loadModel() async {
-       do {
-           let config = MLModelConfiguration()
-           let model = try YOLOv8(configuration: config)
-           self.model = try VNCoreMLModel(for: model.model)
-           print("✅ YOLOモデル読み込み完了")
-       } catch {
-           print("❌ モデル読み込みエラー: \(error)")
-       }
-   }
-   ```
+`scripts/setup_model.sh` が重みのダウンロード、Core ML への変換（NMS 込み・FP16、約48MB）、プロジェクトへの配置までを行います。手順の詳細やモデルの差し替え方法は [docs/YOLO_SETUP_GUIDE.md](docs/YOLO_SETUP_GUIDE.md) を参照してください。
 
 ## 🎨 検出クラスと色
 
 | クラス | 色 | 日本語名 |
 |--------|-----|----------|
-| person | 🔵 Blue | 人 |
-| sports ball | 🔴 Red | ボール |
-| baseball bat | 🟠 Orange | バット |
-| tennis racket | 🟢 Green | ラケット |
-| skateboard | 🟣 Purple | スケートボード |
-| surfboard | 🔷 Cyan | サーフボード |
-| skis | 🟡 Yellow | スキー |
-| snowboard | 🌸 Pink | スノーボード |
-| frisbee | 🌿 Mint | フリスビー |
-| kite | 🟦 Indigo | 凧 |
+| ball | 🔴 Red | ボール |
+| player | 🔵 Blue | 選手 |
+| referee | 🟡 Yellow | 審判 |
+| goalkeeper | 🟢 Green | ゴールキーパー |
 
 ## 🔧 技術スタック
 
@@ -154,6 +130,7 @@ Info.plistに以下の権限が設定されています:
 
 ## 📚 参考
 
+- [mobadam/football-player-detection](https://huggingface.co/mobadam/football-player-detection)
 - [Roboflow Sports](https://github.com/roboflow/sports)
 - [YOLOv8](https://github.com/ultralytics/ultralytics)
 - [Apple Vision Framework](https://developer.apple.com/documentation/vision)
@@ -162,16 +139,17 @@ Info.plistに以下の権限が設定されています:
 ## 🐛 トラブルシューティング
 
 ### 動画が選択できない
-- Info.plistに `NSPhotoLibraryUsageDescription` が設定されているか確認
+- ビルド設定に `INFOPLIST_KEY_NSPhotoLibraryUsageDescription` があるか確認
 - アプリをアンインストールして再インストール
 
 ### 解析が遅い
 - フレームレートを下げる（1〜2 FPS）
 - 最大フレーム数を減らす（10〜20フレーム）
 
-### モデルが読み込まれない
-- YOLODetector.swiftでモデルのロードコードが正しいか確認
-- .mlmodelファイルがターゲットに含まれているか確認
+### モックモードになる（モデルが読み込まれない）
+- `./scripts/setup_model.sh` を実行したか確認
+- `learn-yolo-sports/MLModels/FootballPlayerDetector.mlpackage` があるか確認
+- Product → Clean Build Folder (⌘⇧K) してから再ビルド
 
 ## 📝 ライセンス
 
@@ -183,4 +161,4 @@ mosugi - 2026/10/03
 
 ---
 
-Enjoy analyzing sports videos! 🏀⚽️🎾
+Enjoy analyzing sports videos! ⚽️

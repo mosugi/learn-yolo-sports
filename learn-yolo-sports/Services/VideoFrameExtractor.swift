@@ -29,7 +29,7 @@ actor VideoFrameExtractor {
         progressHandler: ProgressHandler? = nil
     ) async throws -> [CGImage] {
         
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         
         // 動画のトラックを取得
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
@@ -65,7 +65,7 @@ actor VideoFrameExtractor {
         
         var frames: [CGImage] = []
         var frameCount = 0
-        let frameInterval = Int(nominalFrameRate) / fps // 抽出間隔
+        let frameInterval = max(1, Int(nominalFrameRate) / max(1, fps)) // 抽出間隔
         
         // フレームを抽出
         while let sampleBuffer = output.copyNextSampleBuffer() {
@@ -104,16 +104,14 @@ actor VideoFrameExtractor {
     ///   - time: 抽出する時間（秒）
     /// - Returns: 抽出されたCGImage
     func extractFrame(from url: URL, at time: Double) async throws -> CGImage {
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         let imageGenerator = AVAssetImageGenerator(asset: asset)
         imageGenerator.appliesPreferredTrackTransform = true
         imageGenerator.requestedTimeToleranceAfter = .zero
         imageGenerator.requestedTimeToleranceBefore = .zero
         
         let cmTime = CMTime(seconds: time, preferredTimescale: 600)
-        let cgImage = try imageGenerator.copyCGImage(at: cmTime, actualTime: nil)
-        
-        return cgImage
+        return try await imageGenerator.image(at: cmTime).image
     }
     
     /// サンプルバッファからCGImageを作成
