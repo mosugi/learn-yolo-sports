@@ -22,6 +22,9 @@ final class AnalysisStore {
     
     private let baseURL: URL
     
+    /// 書き込み中の保存処理（削除と競合しないように待ち合わせる）
+    private var pendingSaves: [UUID: Task<Void, Error>] = [:]
+    
     init(baseURL: URL = URL.applicationSupportDirectory.appending(path: "Analyses", directoryHint: .isDirectory)) {
         self.baseURL = baseURL
         loadAll()
@@ -112,7 +115,7 @@ final class AnalysisStore {
         let directory = directoryURL(for: record.id)
         let data = try Self.makeEncoder().encode(record)
         
-        try await Task.detached(priority: .utility) {
+        let task = Task.detached(priority: .utility) {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             for frame in record.frames {
                 guard let fileName = frame.imageFileName, let image = images[frame.frameNumber] else { continue }
@@ -120,7 +123,11 @@ final class AnalysisStore {
             }
             // JSON は最後に書く（JSON があれば画像も揃っている）
             try data.write(to: directory.appending(path: "analysis.json"), options: .atomic)
-        }.value
+        }
+        pendingSaves[record.id] = task
+        defer { pendingSaves[record.id] = nil }
+        
+        try await task.value
     }
     
     /// 保存済みの解析結果を更新する
@@ -134,10 +141,17 @@ final class AnalysisStore {
     /// 解析結果を削除する
     func delete(_ record: SavedAnalysis) {
         records.removeAll { $0.id == record.id }
-        do {
-            try FileManager.default.removeItem(at: directoryURL(for: record.id))
-        } catch {
-            print("❌ 解析結果の削除に失敗: \(error)")
+        
+        let directory = directoryURL(for: record.id)
+        let pendingSave = pendingSaves[record.id]
+        Task {
+            // 保存中なら書き込みが終わってから削除する（先に消すと保存処理がファイルを作り直してしまう）
+            _ = try? await pendingSave?.value
+            do {
+                try FileManager.default.removeItem(at: directory)
+            } catch {
+                print("❌ 解析結果の削除に失敗: \(error)")
+            }
         }
     }
     

@@ -158,6 +158,9 @@ class VideoAnalysisViewModel {
                 print("🎯 フレーム \(index + 1)/\(frames.count): \(detections.count)個検出")
             }
 
+            // 最後のフレームの検出中にキャンセルされた場合は保存しない
+            try Task.checkCancellation()
+            
             let duration = Date().timeIntervalSince(startTime)
 
             let record = SavedAnalysis(
