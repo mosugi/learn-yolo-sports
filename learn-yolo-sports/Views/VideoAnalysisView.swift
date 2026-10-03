@@ -10,6 +10,7 @@ import PhotosUI
 
 struct VideoAnalysisView: View {
     @Environment(VideoAnalysisViewModel.self) private var viewModel
+    @Environment(AnalysisStore.self) private var store
     @State private var selectedVideoItem: PhotosPickerItem?
     @State private var showingSettings = false
     @State private var framesPerSecond = 2
@@ -195,114 +196,17 @@ struct VideoAnalysisView: View {
     
     // MARK: - Analysis Result View
     
+    @ViewBuilder
     private var analysisResultView: some View {
-        VStack(spacing: 0) {
-            // 検出結果画像
-            if let frameResult = viewModel.selectedFrameResult,
-               let image = frameResult.image {
-                
-                GeometryReader { geometry in
-                    ZStack {
-                        Image(uiImage: UIImage(cgImage: image))
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: geometry.size.width, height: geometry.size.height)
-                        
-                        DetectionOverlayView(
-                            detections: frameResult.detections,
-                            imageSize: CGSize(width: image.width, height: image.height),
-                            displaySize: geometry.size
-                        )
-                    }
-                }
-                .background(Color.black)
-                .frame(height: 300)
-                
-                // フレーム情報
-                VStack(spacing: 5) {
-                    Text("フレーム \(viewModel.selectedFrameIndex + 1) / \(viewModel.totalFrames)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    
-                    Text("\(frameResult.detections.count) 個検出")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                }
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity)
-                .background(Color(.systemBackground))
-                
-                // フレームスライダー
-                HStack {
-                    Button {
-                        viewModel.previousFrame()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .frame(width: 44, height: 44)
-                    }
-                    .disabled(viewModel.selectedFrameIndex == 0)
-                    
-                    Slider(
-                        value: Binding(
-                            get: { Double(viewModel.selectedFrameIndex) },
-                            set: { viewModel.selectedFrameIndex = Int($0) }
-                        ),
-                        in: 0...Double(max(0, viewModel.detectionResults.count - 1)),
-                        step: 1
-                    )
-                    
-                    Button {
-                        viewModel.nextFrame()
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .frame(width: 44, height: 44)
-                    }
-                    .disabled(viewModel.selectedFrameIndex >= viewModel.detectionResults.count - 1)
-                }
-                .padding(.horizontal)
-                
-                Divider()
-                
-                // 検出リスト
-                if !frameResult.detections.isEmpty {
-                    DetectionListView(detections: frameResult.detections)
-                } else {
-                    ContentUnavailableView(
-                        "検出なし",
-                        systemImage: "magnifyingglass",
-                        description: Text("このフレームでは何も検出されませんでした")
-                    )
-                }
-                
-                // 統計情報
-                if let result = viewModel.analysisResult {
-                    VStack(spacing: 10) {
-                        Divider()
-                        
-                        HStack(spacing: 20) {
-                            StatView(
-                                title: "総検出数",
-                                value: "\(result.totalDetections)",
-                                icon: "scope"
-                            )
-                            
-                            StatView(
-                                title: "平均",
-                                value: String(format: "%.1f", result.averageDetectionsPerFrame),
-                                icon: "chart.bar"
-                            )
-                            
-                            StatView(
-                                title: "処理時間",
-                                value: String(format: "%.1fs", result.duration),
-                                icon: "clock"
-                            )
-                        }
-                        .padding()
-                    }
-                    .background(Color(.secondarySystemBackground))
-                }
-            }
+        if let id = viewModel.currentRecordID, let record = store.record(for: id) {
+            AnalysisResultView(record: record, frames: viewModel.detectionResults)
+                .id(id)
+        } else if let errorMessage = viewModel.errorMessage {
+            ContentUnavailableView(
+                "結果を表示できません",
+                systemImage: "exclamationmark.triangle",
+                description: Text(errorMessage)
+            )
         }
     }
     
@@ -394,32 +298,9 @@ struct VideoAnalysisView: View {
     }
 }
 
-// MARK: - Stat View
-
-struct StatView: View {
-    let title: String
-    let value: String
-    let icon: String
-    
-    var body: some View {
-        VStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(.blue)
-            
-            Text(value)
-                .font(.title3)
-                .fontWeight(.bold)
-            
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
 #Preview {
+    let store = AnalysisStore()
     VideoAnalysisView()
-        .environment(VideoAnalysisViewModel())
+        .environment(store)
+        .environment(VideoAnalysisViewModel(store: store))
 }

@@ -14,7 +14,7 @@ enum AnalysisPhase {
     case idle
     case extracting
     case detecting
-    
+
     var label: String {
         switch self {
         case .idle: return "待機中"
@@ -43,27 +43,22 @@ class VideoAnalysisViewModel {
     var errorMessage: String?
 
     var detectionResults: [FrameDetectionResult] = []
-    var selectedFrameIndex: Int = 0
 
-    var analysisResult: VideoAnalysisResult?
+    /// 直近の解析結果の保存 ID（AnalysisStore から参照する）
+    var currentRecordID: UUID?
 
     /// 解析タブで未確認の解析結果があるか
     var hasUnseenResult = false
-    
+
     /// 実モデルで動作しているか（nil: 未確認, false: モックモード）
     var isUsingRealModel: Bool?
 
     // MARK: - Computed Properties
 
-    var selectedFrameResult: FrameDetectionResult? {
-        guard selectedFrameIndex < detectionResults.count else { return nil }
-        return detectionResults[selectedFrameIndex]
-    }
-
     var hasResults: Bool {
         !detectionResults.isEmpty
     }
-    
+
     /// 進捗の短い説明（例: 物体検出 12/30）
     var progressDescription: String {
         "\(phase.label) \(currentFrame)/\(totalFrames)"
@@ -71,11 +66,16 @@ class VideoAnalysisViewModel {
 
     // MARK: - Dependencies
 
+    private let store: AnalysisStore
     private let frameExtractor = VideoFrameExtractor()
     private let detector = YOLODetector()
 
     private var analysisTask: Task<Void, Never>?
     private var backgroundSession: ContinuedProcessingSession?
+
+    init(store: AnalysisStore) {
+        self.store = store
+    }
 
     // MARK: - Methods
 
@@ -104,8 +104,7 @@ class VideoAnalysisViewModel {
         totalFrames = 0
         errorMessage = nil
         detectionResults = []
-        selectedFrameIndex = 0
-        analysisResult = nil
+        currentRecordID = nil
         videoURL = url
 
         let session = ContinuedProcessingSession { [weak self] in
@@ -137,17 +136,17 @@ class VideoAnalysisViewModel {
             var results: [FrameDetectionResult] = []
             phase = .detecting
             currentFrame = 0
-            
+
             for (index, frame) in frames.enumerated() {
                 try Task.checkCancellation()
 
-                let detections = try await detector.detect(image: frame)
+                let detections = try await detector.detect(image: frame.image)
 
                 let result = FrameDetectionResult(
                     frameNumber: index,
-                    timestamp: Double(index) / Double(framesPerSecond),
+                    timestamp: frame.timestamp,
                     detections: detections,
-                    image: frame
+                    image: frame.image
                 )
 
                 results.append(result)
@@ -159,23 +158,35 @@ class VideoAnalysisViewModel {
                 print("🎯 フレーム \(index + 1)/\(frames.count): \(detections.count)個検出")
             }
 
-            detectionResults = results
+            let duration = Date().timeIntervalSince(startTime)
 
-            let endTime = Date()
-            let duration = endTime.timeIntervalSince(startTime)
-
-            // 解析結果を作成
-            analysisResult = VideoAnalysisResult(
-                totalFrames: frames.count,
-                processedFrames: frames.count,
-                detectionResults: results,
-                duration: duration
+            let record = SavedAnalysis(
+                videoName: url.lastPathComponent,
+                framesPerSecond: framesPerSecond,
+                processingDuration: duration,
+                usedRealModel: isUsingRealModel ?? false,
+                results: results
             )
+
+            detectionResults = results
+            currentRecordID = record.id
 
             print("✅ 解析完了!")
             print("  - 処理時間: \(String(format: "%.2f", duration))秒")
-            print("  - 総検出数: \(analysisResult?.totalDetections ?? 0)")
-            print("  - 平均検出数: \(String(format: "%.2f", analysisResult?.averageDetectionsPerFrame ?? 0))")
+            print("  - 総検出数: \(record.totalDetections)")
+            print("  - 平均検出数: \(String(format: "%.2f", record.averageDetectionsPerFrame))")
+
+            // 解析結果を保存
+            let images = Dictionary(uniqueKeysWithValues: results.compactMap { result in
+                result.image.map { (result.frameNumber, $0) }
+            })
+            do {
+                try await store.save(record, images: images)
+                print("💾 解析結果を保存しました: \(record.id)")
+            } catch {
+                errorMessage = "解析結果の保存に失敗しました: \(error.localizedDescription)"
+                print("❌ 保存エラー: \(error)")
+            }
 
             hasUnseenResult = true
             session.finish(success: true)
@@ -211,7 +222,7 @@ class VideoAnalysisViewModel {
     func markResultSeen() {
         hasUnseenResult = false
     }
-    
+
     /// 解析をキャンセル
     func cancelAnalysis() {
         analysisTask?.cancel()
@@ -226,22 +237,7 @@ class VideoAnalysisViewModel {
         totalFrames = 0
         errorMessage = nil
         detectionResults = []
-        selectedFrameIndex = 0
-        analysisResult = nil
+        currentRecordID = nil
         hasUnseenResult = false
-    }
-    
-    /// 次のフレームへ
-    func nextFrame() {
-        if selectedFrameIndex < detectionResults.count - 1 {
-            selectedFrameIndex += 1
-        }
-    }
-
-    /// 前のフレームへ
-    func previousFrame() {
-        if selectedFrameIndex > 0 {
-            selectedFrameIndex -= 1
-        }
     }
 }

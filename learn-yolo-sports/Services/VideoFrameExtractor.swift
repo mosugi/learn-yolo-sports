@@ -9,6 +9,13 @@ import AVFoundation
 import CoreImage
 import UIKit
 
+/// 抽出したフレーム
+nonisolated struct ExtractedFrame {
+    let image: CGImage
+    /// 動画先頭からの時刻（秒）
+    let timestamp: Double
+}
+
 /// 動画からフレームを抽出するクラス
 actor VideoFrameExtractor {
     
@@ -21,13 +28,13 @@ actor VideoFrameExtractor {
     ///   - fps: 抽出するフレームレート（デフォルト: 1フレーム/秒）
     ///   - maxFrames: 最大抽出フレーム数（デフォルト: 100）
     ///   - progressHandler: 進捗ハンドラー
-    /// - Returns: 抽出されたCGImageの配列
+    /// - Returns: 抽出されたフレームの配列
     func extractFrames(
         from url: URL,
         fps: Int = 1,
         maxFrames: Int = 100,
         progressHandler: ProgressHandler? = nil
-    ) async throws -> [CGImage] {
+    ) async throws -> [ExtractedFrame] {
         
         let asset = AVURLAsset(url: url)
         
@@ -64,7 +71,7 @@ actor VideoFrameExtractor {
         reader.startReading()
         defer { reader.cancelReading() }
         
-        var frames: [CGImage] = []
+        var frames: [ExtractedFrame] = []
         var frameCount = 0
         let frameInterval = max(1, Int(nominalFrameRate) / max(1, fps)) // 抽出間隔
         
@@ -76,7 +83,8 @@ actor VideoFrameExtractor {
             if frameCount % frameInterval == 0 {
                 
                 if let cgImage = createCGImage(from: sampleBuffer) {
-                    frames.append(cgImage)
+                    let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                    frames.append(ExtractedFrame(image: cgImage, timestamp: CMTimeGetSeconds(time)))
                     
                     // 進捗を通知
                     await progressHandler?(frames.count, maxFrames)

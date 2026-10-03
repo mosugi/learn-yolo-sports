@@ -10,6 +10,7 @@ import SwiftUI
 struct ContentView: View {
     enum AppTab: Hashable {
         case analysis
+        case history
         case player
         case info
     }
@@ -25,6 +26,12 @@ struct ContentView: View {
                 }
                 .badge(analysisBadge)
                 .tag(AppTab.analysis)
+            
+            HistoryView()
+                .tabItem {
+                    Label("履歴", systemImage: "clock.arrow.circlepath")
+                }
+                .tag(AppTab.history)
             
             VideoPickerView()
                 .tabItem {
@@ -69,6 +76,8 @@ struct ContentView: View {
 }
 
 #Preview {
+    let store = AnalysisStore()
     ContentView()
-        .environment(VideoAnalysisViewModel())
+        .environment(store)
+        .environment(VideoAnalysisViewModel(store: store))
 }
