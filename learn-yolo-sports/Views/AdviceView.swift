@@ -1,0 +1,159 @@
+//
+//  AdviceView.swift
+//  learn-yolo-sports
+//
+//  Created by mosugi on 2026/10/03.
+//
+
+import SwiftUI
+
+/// Apple Intelligence によるアドバイスの表示
+struct AdviceView: View {
+    @Environment(AnalysisStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    
+    let recordID: UUID
+    
+    @State private var advisor = IntelligenceAdvisor()
+    @State private var saveError: String?
+    
+    private var record: SavedAnalysis? {
+        store.record(for: recordID)
+    }
+    
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    if let reason = advisor.unavailableReason {
+                        ContentUnavailableView(
+                            "アドバイスを生成できません",
+                            systemImage: "apple.intelligence",
+                            description: Text(reason)
+                        )
+                    } else if let record {
+                        content(for: record)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("AIアドバイス")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("閉じる") {
+                        advisor.cancel()
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func content(for record: SavedAnalysis) -> some View {
+        if !record.usedRealModel {
+            Label("モックモードの結果のため、アドバイスは参考になりません", systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+        
+        if advisor.isGenerating, let partial = advisor.partial {
+            adviceSections(
+                summary: partial.summary,
+                observations: partial.observations ?? [],
+                suggestions: partial.suggestions ?? []
+            )
+        } else if advisor.isGenerating {
+            HStack {
+                ProgressView()
+                Text("指標を分析しています...")
+                    .foregroundStyle(.secondary)
+            }
+        } else if let advice = record.advice {
+            adviceSections(
+                summary: advice.summary,
+                observations: advice.observations,
+                suggestions: advice.suggestions
+            )
+            
+            Text("生成日時: \(advice.generatedAt.formatted(date: .abbreviated, time: .shortened))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        
+        if case .failed(let message) = advisor.state {
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+        
+        if let saveError {
+            Text(saveError)
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+        
+        if !advisor.isGenerating {
+            Button {
+                generate(for: record)
+            } label: {
+                Label(record.advice == nil ? "アドバイスを生成" : "再生成", systemImage: "apple.intelligence")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        
+        Text("Apple Intelligence により端末上で生成されます。検出結果にはチームの区別がなく、誤検出も含まれるため参考情報としてご利用ください。")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+    }
+    
+    private func adviceSections(summary: String?, observations: [String], suggestions: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            if let summary, !summary.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("総評")
+                        .font(.headline)
+                    Text(summary)
+                }
+            }
+            
+            if !observations.isEmpty {
+                bulletSection(title: "観察ポイント", systemImage: "eye", items: observations)
+            }
+            
+            if !suggestions.isEmpty {
+                bulletSection(title: "改善提案", systemImage: "lightbulb", items: suggestions)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    
+    private func bulletSection(title: String, systemImage: String, items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+            
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("・")
+                    Text(item)
+                }
+            }
+        }
+    }
+    
+    private func generate(for record: SavedAnalysis) {
+        saveError = nil
+        advisor.generate(for: record) { advice in
+            var updated = store.record(for: record.id) ?? record
+            updated.advice = advice
+            do {
+                try store.update(updated)
+            } catch {
+                saveError = "アドバイスの保存に失敗しました: \(error.localizedDescription)"
+            }
+        }
+    }
+}

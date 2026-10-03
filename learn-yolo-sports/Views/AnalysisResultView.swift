@@ -14,6 +14,7 @@ struct AnalysisResultView: View {
     let frames: [FrameDetectionResult]
     
     @State private var selectedFrameIndex = 0
+    @State private var showingAdvice = false
     
     private var selectedFrame: FrameDetectionResult? {
         guard frames.indices.contains(selectedFrameIndex) else { return nil }
@@ -63,6 +64,17 @@ struct AnalysisResultView: View {
             ToolbarItem(placement: .topBarLeading) {
                 AnalysisShareMenu(record: record)
             }
+            
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showingAdvice = true
+                } label: {
+                    Label("AIアドバイス", systemImage: "apple.intelligence")
+                }
+            }
+        }
+        .sheet(isPresented: $showingAdvice) {
+            AdviceView(recordID: record.id)
         }
     }
     

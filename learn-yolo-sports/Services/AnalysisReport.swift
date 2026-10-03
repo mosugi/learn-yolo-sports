@@ -45,6 +45,19 @@ nonisolated enum AnalysisReport {
         }
         lines.append("")
         
+        lines.append("## 位置に関する指標")
+        lines.append(AnalysisMetrics(record: record).summaryText)
+        lines.append("")
+        
+        if let advice = record.advice {
+            lines.append("## 端末上の AI（Apple Intelligence）による一次所見")
+            lines.append(advice.summary)
+            lines.append("")
+            lines.append(contentsOf: advice.observations.map { "- 観察: \($0)" })
+            lines.append(contentsOf: advice.suggestions.map { "- 提案: \($0)" })
+            lines.append("")
+        }
+        
         lines.append("## フレーム別")
         lines.append("| # | 時刻(秒) | player | goalkeeper | referee | ボール中心 (x, y) | 選手の平均位置 (x, y) |")
         lines.append("|---|---|---|---|---|---|---|")

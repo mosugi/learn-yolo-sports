@@ -37,6 +37,14 @@ nonisolated struct SavedFrame: Codable, Hashable, Identifiable {
     }
 }
 
+/// Apple Intelligence によるアドバイス
+nonisolated struct AnalysisAdvice: Codable, Hashable {
+    let summary: String
+    let observations: [String]
+    let suggestions: [String]
+    let generatedAt: Date
+}
+
 /// 保存された解析結果
 nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     let id: UUID
@@ -50,6 +58,8 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     /// false の場合はモックモードの結果
     let usedRealModel: Bool
     let frames: [SavedFrame]
+    /// 生成済みのアドバイス
+    var advice: AnalysisAdvice? = nil
     
     // MARK: - 集計
     
