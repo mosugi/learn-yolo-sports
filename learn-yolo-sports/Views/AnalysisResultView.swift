@@ -11,60 +11,46 @@ import UIKit
 /// 解析結果の表示（解析直後と履歴の両方で使う）
 struct AnalysisResultView: View {
     let record: SavedAnalysis
-    let frames: [FrameDetectionResult]
-    
-    @State private var selectedFrameIndex = 0
-    @State private var showingAdvice = false
-    
-    private var selectedFrame: FrameDetectionResult? {
-        guard frames.indices.contains(selectedFrameIndex) else { return nil }
-        return frames[selectedFrameIndex]
+
+    private enum Tab: Hashable {
+        case coach
+        case detections
     }
-    
+
+    @State private var tab: Tab
+    @State private var showingAdvice = false
+
+    init(record: SavedAnalysis) {
+        self.record = record
+        _tab = State(initialValue: record.coachReport != nil ? .coach : .detections)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            if let frameResult = selectedFrame {
-                frameImage(frameResult)
-                    .background(Color.black)
-                    .frame(height: 300)
-                
-                // フレーム情報
-                VStack(spacing: 5) {
-                    Text("フレーム \(selectedFrameIndex + 1) / \(frames.count)（\(String(format: "%.1f", frameResult.timestamp))秒）")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    
-                    Text("\(frameResult.detections.count) 個検出")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
+            if let report = record.coachReport, let setup = record.setup {
+                Picker("表示", selection: $tab) {
+                    Text("コーチ解説").tag(Tab.coach)
+                    Text("検出結果").tag(Tab.detections)
                 }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
                 .padding(.vertical, 8)
-                .frame(maxWidth: .infinity)
-                .background(Color(.systemBackground))
-                
-                frameSlider
-                
-                Divider()
-                
-                // 検出リスト
-                if !frameResult.detections.isEmpty {
-                    DetectionListView(detections: frameResult.detections)
-                } else {
-                    ContentUnavailableView(
-                        "検出なし",
-                        systemImage: "magnifyingglass",
-                        description: Text("このフレームでは何も検出されませんでした")
-                    )
+
+                switch tab {
+                case .coach:
+                    CoachReportView(record: record, report: report, setup: setup)
+                case .detections:
+                    DetectionBrowserView(record: record)
                 }
-                
-                statistics
+            } else {
+                DetectionBrowserView(record: record)
             }
         }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 AnalysisShareMenu(record: record)
             }
-            
+
             ToolbarItem(placement: .topBarLeading) {
                 Button {
                     showingAdvice = true
@@ -77,32 +63,75 @@ struct AnalysisResultView: View {
             AdviceView(recordID: record.id)
         }
     }
-    
-    // MARK: - Components
-    
-    private func frameImage(_ frameResult: FrameDetectionResult) -> some View {
-        GeometryReader { geometry in
-            if let image = frameResult.image {
-                ZStack {
-                    Image(uiImage: UIImage(cgImage: image))
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                    
-                    DetectionOverlayView(
-                        detections: frameResult.detections,
-                        imageSize: CGSize(width: image.width, height: image.height),
-                        displaySize: geometry.size
-                    )
+}
+
+// MARK: - Detection Browser
+
+/// フレームごとの検出結果
+struct DetectionBrowserView: View {
+    let record: SavedAnalysis
+
+    @State private var selectedFrameIndex = 0
+
+    var body: some View {
+        // 画像が保存されているフレームだけをたどる
+        let frames = record.framesWithImages
+        VStack(spacing: 0) {
+            if frames.indices.contains(selectedFrameIndex) {
+                let frame = frames[selectedFrameIndex]
+
+                SavedFrameView(record: record, frame: frame)
+                    .frame(height: 260)
+
+                VStack(spacing: 5) {
+                    Text("フレーム \(selectedFrameIndex + 1) / \(frames.count)（\(CoachReport.time(frame.timestamp))）")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+
+                    Text(detectionSummary(frame))
+                        .font(.headline)
                 }
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
+
+                frameSlider(count: frames.count)
+
+                Divider()
+
+                ScrollView {
+                    if frame.detections.isEmpty {
+                        ContentUnavailableView(
+                            "検出なし",
+                            systemImage: "magnifyingglass",
+                            description: Text("このフレームでは何も検出されませんでした")
+                        )
+                    } else {
+                        DetectionListView(detections: frame.detections)
+                    }
+                }
+
+                statistics
             } else {
-                ContentUnavailableView("画像なし", systemImage: "photo")
-                    .foregroundStyle(.white)
+                ContentUnavailableView("フレームがありません", systemImage: "photo.stack")
             }
         }
     }
-    
-    private var frameSlider: some View {
+
+    private func detectionSummary(_ frame: SavedFrame) -> String {
+        let included = frame.detections.filter { !$0.isExcluded }
+        let excluded = frame.detections.count - included.count
+        guard record.setup != nil else { return "\(frame.detections.count) 個検出" }
+        let own = included.filter { $0.team == .own }.count
+        let opponent = included.filter { $0.team == .opponent }.count
+        var text = "自チーム \(own)・相手 \(opponent)"
+        if excluded > 0 {
+            text += "（コート外 \(excluded)）"
+        }
+        return text
+    }
+
+    private func frameSlider(count: Int) -> some View {
         HStack {
             Button {
                 selectedFrameIndex -= 1
@@ -111,48 +140,48 @@ struct AnalysisResultView: View {
                     .frame(width: 44, height: 44)
             }
             .disabled(selectedFrameIndex == 0)
-            
-            if frames.count > 1 {
+
+            if count > 1 {
                 Slider(
                     value: Binding(
                         get: { Double(selectedFrameIndex) },
                         set: { selectedFrameIndex = Int($0) }
                     ),
-                    in: 0...Double(frames.count - 1),
+                    in: 0...Double(count - 1),
                     step: 1
                 )
             } else {
                 Spacer()
             }
-            
+
             Button {
                 selectedFrameIndex += 1
             } label: {
                 Image(systemName: "chevron.right")
                     .frame(width: 44, height: 44)
             }
-            .disabled(selectedFrameIndex >= frames.count - 1)
+            .disabled(selectedFrameIndex >= count - 1)
         }
         .padding(.horizontal)
     }
-    
+
     private var statistics: some View {
         VStack(spacing: 10) {
             Divider()
-            
+
             HStack(spacing: 20) {
                 StatView(
-                    title: "総検出数",
-                    value: "\(record.totalDetections)",
-                    icon: "scope"
+                    title: "解析フレーム",
+                    value: "\(record.frames.count)",
+                    icon: "photo.stack"
                 )
-                
+
                 StatView(
-                    title: "平均",
+                    title: "平均検出数",
                     value: String(format: "%.1f", record.averageDetectionsPerFrame),
                     icon: "chart.bar"
                 )
-                
+
                 StatView(
                     title: "処理時間",
                     value: String(format: "%.1fs", record.processingDuration),
@@ -171,10 +200,10 @@ struct AnalysisResultView: View {
 struct AnalysisShareMenu: View {
     @Environment(AnalysisStore.self) private var store
     let record: SavedAnalysis
-    
+
     var body: some View {
         let report = AnalysisReport.markdown(for: record)
-        
+
         Menu {
             ShareLink(
                 item: report,
@@ -183,13 +212,13 @@ struct AnalysisShareMenu: View {
             ) {
                 Label("LLM向けテキストを共有", systemImage: "text.bubble")
             }
-            
+
             Button {
                 UIPasteboard.general.string = report
             } label: {
                 Label("LLM向けテキストをコピー", systemImage: "doc.on.doc")
             }
-            
+
             let jsonURL = store.jsonURL(for: record)
             if FileManager.default.fileExists(atPath: jsonURL.path()) {
                 ShareLink(item: jsonURL, preview: SharePreview("analysis.json")) {
@@ -208,17 +237,17 @@ struct StatView: View {
     let title: String
     let value: String
     let icon: String
-    
+
     var body: some View {
         VStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.title3)
                 .foregroundStyle(.blue)
-            
+
             Text(value)
                 .font(.title3)
                 .fontWeight(.bold)
-            
+
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.secondary)

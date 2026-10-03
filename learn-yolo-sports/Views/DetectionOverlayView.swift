@@ -7,145 +7,172 @@
 
 import SwiftUI
 
-/// 検出結果をオーバーレイ表示するビュー
-struct DetectionOverlayView: View {
-    let detections: [Detection]
-    let imageSize: CGSize
-    let displaySize: CGSize
-    
+/// フレーム画像に検出結果とコートのラインを重ねて表示するビュー
+///
+/// 画像は縦横比を保って枠に収め、検出枠も同じ位置に合わせる。
+struct AnnotatedFrameView: View {
+    let image: CGImage
+    let detections: [SavedDetection]
+    /// コートのライン（正規化座標の線分）
+    var courtLines: [(CGPoint, CGPoint)] = []
+    /// ラベルを表示するか（小さな表示では省く）
+    var showsLabels = true
+
     var body: some View {
         GeometryReader { geometry in
-            ZStack {
-                ForEach(detections) { detection in
-                    let scaledBox = scaleBox(detection.boundingBox, from: imageSize, to: displaySize)
-                    
-                    ZStack(alignment: .topLeading) {
-                        // バウンディングボックス
-                        Rectangle()
-                            .strokeBorder(detection.color, lineWidth: 3)
-                            .background(detection.color.opacity(0.1))
-                        
-                        // ラベル
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(SportsClass(rawValue: detection.label)?.japaneseName ?? detection.label)
-                                .font(.caption2)
-                                .fontWeight(.bold)
-                            
-                            Text("\(detection.confidencePercentage)%")
-                                .font(.caption2)
-                        }
-                        .padding(4)
-                        .background(detection.color)
-                        .foregroundStyle(.white)
-                        .cornerRadius(4)
-                        .offset(y: -30)
+            let imageSize = CGSize(width: image.width, height: image.height)
+            let fit = ImageFit.rect(imageSize: imageSize, in: geometry.size)
+
+            ZStack(alignment: .topLeading) {
+                Image(uiImage: UIImage(cgImage: image))
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+
+                // コートのライン
+                Path { path in
+                    for (start, end) in courtLines {
+                        path.move(to: point(start, in: fit))
+                        path.addLine(to: point(end, in: fit))
                     }
-                    .frame(width: scaledBox.width, height: scaledBox.height)
-                    .position(x: scaledBox.midX, y: scaledBox.midY)
+                }
+                .stroke(Color.white.opacity(0.8), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+
+                ForEach(Array(detections.enumerated()), id: \.offset) { _, detection in
+                    let box = rect(detection.boundingBox, in: fit)
+                    let color = detection.displayColor
+
+                    Rectangle()
+                        .strokeBorder(
+                            color,
+                            style: StrokeStyle(lineWidth: detection.isExcluded ? 1 : 2, dash: detection.isExcluded ? [3, 3] : [])
+                        )
+                        .frame(width: max(box.width, 2), height: max(box.height, 2))
+                        .position(x: box.midX, y: box.midY)
+
+                    if showsLabels && !detection.isExcluded {
+                        Text(label(for: detection))
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 3)
+                            .background(color)
+                            .foregroundStyle(.black)
+                            .cornerRadius(3)
+                            .fixedSize()
+                            .position(x: box.midX, y: max(6, box.minY - 7))
+                    }
                 }
             }
         }
+        .clipped()
     }
-    
-    /// バウンディングボックスをスケーリング
-    private func scaleBox(_ box: CGRect, from originalSize: CGSize, to displaySize: CGSize) -> CGRect {
-        let scaleX = displaySize.width / originalSize.width
-        let scaleY = displaySize.height / originalSize.height
-        
-        return CGRect(
-            x: box.origin.x * scaleX,
-            y: box.origin.y * scaleY,
-            width: box.width * scaleX,
-            height: box.height * scaleY
+
+    private func label(for detection: SavedDetection) -> String {
+        if let trackID = detection.trackID {
+            return "\(detection.displayName) #\(trackID)"
+        }
+        return detection.displayName
+    }
+
+    private func point(_ normalized: CGPoint, in fit: CGRect) -> CGPoint {
+        CGPoint(x: fit.minX + normalized.x * fit.width, y: fit.minY + normalized.y * fit.height)
+    }
+
+    private func rect(_ normalized: CGRect, in fit: CGRect) -> CGRect {
+        CGRect(
+            x: fit.minX + normalized.minX * fit.width,
+            y: fit.minY + normalized.minY * fit.height,
+            width: normalized.width * fit.width,
+            height: normalized.height * fit.height
         )
+    }
+}
+
+/// 保存済みのフレームを読み込んで、検出結果を重ねて表示する
+struct SavedFrameView: View {
+    @Environment(AnalysisStore.self) private var store
+    let record: SavedAnalysis
+    let frame: SavedFrame
+    var showsLabels = true
+
+    @State private var image: CGImage?
+    @State private var didLoad = false
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let image {
+                AnnotatedFrameView(
+                    image: image,
+                    detections: frame.detections,
+                    courtLines: record.setup.flatMap { CourtGeometry(setup: $0) }?.imageLineSegments() ?? [],
+                    showsLabels: showsLabels
+                )
+            } else if didLoad {
+                ContentUnavailableView("画像なし", systemImage: "photo")
+                    .foregroundStyle(.white)
+            } else {
+                ProgressView()
+                    .tint(.white)
+            }
+        }
+        .task(id: frame.id) {
+            didLoad = false
+            image = await store.image(for: frame, in: record)
+            didLoad = true
+        }
     }
 }
 
 /// 検出結果リスト表示
 struct DetectionListView: View {
-    let detections: [Detection]
-    
+    let detections: [SavedDetection]
+
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 8) {
-                ForEach(detections) { detection in
-                    HStack {
-                        Circle()
-                            .fill(detection.color)
-                            .frame(width: 12, height: 12)
-                        
-                        Text(SportsClass(rawValue: detection.label)?.japaneseName ?? detection.label)
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                        
-                        Spacer()
-                        
-                        Text("\(detection.confidencePercentage)%")
-                            .font(.caption)
+        LazyVStack(spacing: 8) {
+            ForEach(Array(detections.enumerated()), id: \.offset) { _, detection in
+                HStack {
+                    Circle()
+                        .fill(detection.displayColor)
+                        .frame(width: 12, height: 12)
+
+                    Text(detection.displayName)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(detection.isExcluded ? .secondary : .primary)
+
+                    if let position = detection.pitchPosition, !detection.isExcluded {
+                        Text(String(format: "(%.0f, %.0f) m", position.x, position.y))
+                            .font(.caption2)
+                            .monospacedDigit()
                             .foregroundStyle(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(detection.color.opacity(0.2))
-                            .cornerRadius(8)
                     }
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
-                    .background(Color(.systemBackground))
-                    .cornerRadius(10)
-                    .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
+
+                    Spacer()
+
+                    Text("\(detection.confidencePercentage)%")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(detection.displayColor.opacity(0.2))
+                        .cornerRadius(8)
                 }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color(.systemBackground))
+                .cornerRadius(10)
+                .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
             }
-            .padding()
         }
+        .padding()
     }
 }
 
-#Preview("Overlay") {
-    let mockDetections = [
-        Detection(
-            label: "player",
-            confidence: 0.92,
-            boundingBox: CGRect(x: 100, y: 100, width: 200, height: 300),
-            color: .blue
-        ),
-        Detection(
-            label: "ball",
-            confidence: 0.85,
-            boundingBox: CGRect(x: 300, y: 200, width: 80, height: 80),
-            color: .red
-        )
-    ]
-    
-    DetectionOverlayView(
-        detections: mockDetections,
-        imageSize: CGSize(width: 640, height: 480),
-        displaySize: CGSize(width: 320, height: 240)
-    )
-    .frame(width: 320, height: 240)
-    .background(Color.gray.opacity(0.3))
-}
-
 #Preview("List") {
-    let mockDetections = [
-        Detection(
-            label: "player",
-            confidence: 0.92,
-            boundingBox: CGRect(x: 100, y: 100, width: 200, height: 300),
-            color: .blue
-        ),
-        Detection(
-            label: "ball",
-            confidence: 0.85,
-            boundingBox: CGRect(x: 300, y: 200, width: 80, height: 80),
-            color: .red
-        ),
-        Detection(
-            label: "referee",
-            confidence: 0.78,
-            boundingBox: CGRect(x: 150, y: 250, width: 100, height: 150),
-            color: .yellow
-        )
-    ]
-    
-    DetectionListView(detections: mockDetections)
+    DetectionListView(detections: [
+        SavedDetection(label: "player", confidence: 0.92, boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.05, height: 0.15), pitchPosition: CGPoint(x: 30, y: 20), inCourt: true, team: .own, trackID: 3),
+        SavedDetection(label: "player", confidence: 0.81, boundingBox: CGRect(x: 0.3, y: 0.2, width: 0.05, height: 0.15), pitchPosition: CGPoint(x: 40, y: 25), inCourt: true, team: .opponent, trackID: 5),
+        SavedDetection(label: "ball", confidence: 0.85, boundingBox: CGRect(x: 0.5, y: 0.5, width: 0.01, height: 0.01)),
+        SavedDetection(label: "player", confidence: 0.6, boundingBox: CGRect(x: 0.8, y: 0.1, width: 0.02, height: 0.05), inCourt: false),
+    ])
 }

@@ -104,7 +104,9 @@ struct AdviceView: View {
             .buttonStyle(.borderedProminent)
         }
         
-        Text("Apple Intelligence により端末上で生成されます。検出結果にはチームの区別がなく、誤検出も含まれるため参考情報としてご利用ください。")
+        Text(record.coachReport == nil
+             ? "Apple Intelligence により端末上で生成されます。コート設定なしの解析のためチームの区別がなく、参考情報としてご利用ください。"
+             : "Apple Intelligence により端末上で生成されます。場面の判定は規則に基づいて行い、AI はその言語化だけを担当します。")
             .font(.caption2)
             .foregroundStyle(.secondary)
     }
@@ -120,11 +122,11 @@ struct AdviceView: View {
             }
             
             if !observations.isEmpty {
-                bulletSection(title: "観察ポイント", systemImage: "eye", items: observations)
+                bulletSection(title: "場面の解説", systemImage: "eye", items: observations)
             }
             
             if !suggestions.isEmpty {
-                bulletSection(title: "改善提案", systemImage: "lightbulb", items: suggestions)
+                bulletSection(title: "次に取り組むこと", systemImage: "lightbulb", items: suggestions)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

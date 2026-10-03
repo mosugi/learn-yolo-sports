@@ -14,6 +14,19 @@ nonisolated struct SavedDetection: Codable, Hashable {
     let confidence: Float
     /// 画像に対する正規化座標（0〜1、左上原点）
     let boundingBox: CGRect
+    /// 足元のピッチ座標（m）。コート設定がない場合は nil
+    var pitchPosition: CGPoint? = nil
+    /// 対象コート内か（nil はコート設定なし）
+    var inCourt: Bool? = nil
+    /// 所属チーム（判定できなかった場合は nil）
+    var team: TeamSide? = nil
+    /// 追跡 ID
+    var trackID: Int? = nil
+    
+    /// 解析対象から外した検出（対象コート外）か
+    var isExcluded: Bool {
+        inCourt == false
+    }
     
     /// バウンディングボックスの中心（正規化座標）
     var center: CGPoint {
@@ -32,8 +45,9 @@ nonisolated struct SavedFrame: Codable, Hashable, Identifiable {
     
     var id: Int { frameNumber }
     
+    /// 指定したクラスの検出（対象コート外のものは除く）
     func detections(of sportsClass: SportsClass) -> [SavedDetection] {
-        detections.filter { $0.label == sportsClass.rawValue }
+        detections.filter { $0.label == sportsClass.rawValue && !$0.isExcluded }
     }
 }
 
@@ -60,6 +74,20 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     let frames: [SavedFrame]
     /// 生成済みのアドバイス
     var advice: AnalysisAdvice? = nil
+    /// コート・チームの設定（未設定で解析した場合は nil）
+    var setup: AnalysisSetup? = nil
+    /// ルールベースのコーチ解説（コート設定がある場合のみ）
+    var coachReport: CoachReport? = nil
+    
+    /// 画像が保存されているフレーム
+    var framesWithImages: [SavedFrame] {
+        frames.filter { $0.imageFileName != nil }
+    }
+    
+    /// 指定した時刻に最も近い、画像のあるフレーム
+    func nearestFrameWithImage(to time: Double) -> SavedFrame? {
+        framesWithImages.min { abs($0.timestamp - time) < abs($1.timestamp - time) }
+    }
     
     // MARK: - 集計
     
@@ -97,46 +125,23 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     }
 }
 
-extension SavedAnalysis {
-    /// 解析結果から保存用データを作る
-    nonisolated init(
-        id: UUID = UUID(),
-        createdAt: Date = Date(),
-        videoName: String,
-        framesPerSecond: Int,
-        processingDuration: Double,
-        usedRealModel: Bool,
-        results: [FrameDetectionResult]
-    ) {
-        let width = results.first?.image?.width ?? 0
-        let height = results.first?.image?.height ?? 0
-        
+extension SavedFrame {
+    /// 解析結果から保存用のフレームを作る
+    nonisolated init(processed frame: ProcessedFrame, assignments: [Int: DetectionAssignment]?) {
         self.init(
-            id: id,
-            createdAt: createdAt,
-            videoName: videoName,
-            framesPerSecond: framesPerSecond,
-            imageWidth: width,
-            imageHeight: height,
-            processingDuration: processingDuration,
-            usedRealModel: usedRealModel,
-            frames: results.map { result in
-                let w = CGFloat(result.image?.width ?? width)
-                let h = CGFloat(result.image?.height ?? height)
-                return SavedFrame(
-                    frameNumber: result.frameNumber,
-                    timestamp: result.timestamp,
-                    imageFileName: result.image == nil ? nil : AnalysisStore.imageFileName(for: result.frameNumber),
-                    detections: result.detections.map { detection in
-                        let box = detection.boundingBox
-                        return SavedDetection(
-                            label: detection.label,
-                            confidence: detection.confidence,
-                            boundingBox: w > 0 && h > 0
-                                ? CGRect(x: box.minX / w, y: box.minY / h, width: box.width / w, height: box.height / h)
-                                : .zero
-                        )
-                    }
+            frameNumber: frame.index,
+            timestamp: frame.timestamp,
+            imageFileName: frame.imageFileName,
+            detections: frame.detections.enumerated().map { index, detection in
+                let assignment = assignments?[index]
+                return SavedDetection(
+                    label: detection.label,
+                    confidence: detection.confidence,
+                    boundingBox: detection.boundingBox,
+                    pitchPosition: detection.pitchPosition,
+                    inCourt: detection.inCourt,
+                    team: assignment?.team,
+                    trackID: assignment?.trackID
                 )
             }
         )
