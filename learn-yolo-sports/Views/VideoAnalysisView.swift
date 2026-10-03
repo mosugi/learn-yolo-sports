@@ -313,7 +313,7 @@ struct VideoAnalysisView: View {
         VStack(spacing: 12) {
             HStack {
                 ProgressView()
-                Text("解析中...")
+                Text("解析中（\(viewModel.phase.label)）")
                     .font(.headline)
                 Spacer()
                 Text("\(Int(viewModel.analysisProgress * 100))%")

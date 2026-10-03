@@ -9,6 +9,21 @@ import Foundation
 import SwiftUI
 import AVFoundation
 
+/// 解析の進行段階
+enum AnalysisPhase {
+    case idle
+    case extracting
+    case detecting
+    
+    var label: String {
+        switch self {
+        case .idle: return "待機中"
+        case .extracting: return "フレーム抽出"
+        case .detecting: return "物体検出"
+        }
+    }
+}
+
 /// 動画解析のビューモデル
 ///
 /// App で1つだけ生成して Environment で共有する。解析は View のライフサイクルから切り離した
@@ -21,6 +36,7 @@ class VideoAnalysisViewModel {
 
     var videoURL: URL?
     var isAnalyzing = false
+    var phase: AnalysisPhase = .idle
     var analysisProgress: Double = 0.0
     var currentFrame: Int = 0
     var totalFrames: Int = 0
@@ -31,6 +47,9 @@ class VideoAnalysisViewModel {
 
     var analysisResult: VideoAnalysisResult?
 
+    /// 解析タブで未確認の解析結果があるか
+    var hasUnseenResult = false
+    
     /// 実モデルで動作しているか（nil: 未確認, false: モックモード）
     var isUsingRealModel: Bool?
 
@@ -43,6 +62,11 @@ class VideoAnalysisViewModel {
 
     var hasResults: Bool {
         !detectionResults.isEmpty
+    }
+    
+    /// 進捗の短い説明（例: 物体検出 12/30）
+    var progressDescription: String {
+        "\(phase.label) \(currentFrame)/\(totalFrames)"
     }
 
     // MARK: - Dependencies
@@ -73,6 +97,8 @@ class VideoAnalysisViewModel {
     /// 動画を解析
     private func analyzeVideo(url: URL, framesPerSecond: Int, maxFrames: Int) async {
         isAnalyzing = true
+        phase = .extracting
+        hasUnseenResult = false
         analysisProgress = 0.0
         currentFrame = 0
         totalFrames = 0
@@ -109,7 +135,9 @@ class VideoAnalysisViewModel {
             // 各フレームで物体検出
             print("🤖 物体検出中...")
             var results: [FrameDetectionResult] = []
-
+            phase = .detecting
+            currentFrame = 0
+            
             for (index, frame) in frames.enumerated() {
                 try Task.checkCancellation()
 
@@ -149,6 +177,7 @@ class VideoAnalysisViewModel {
             print("  - 総検出数: \(analysisResult?.totalDetections ?? 0)")
             print("  - 平均検出数: \(String(format: "%.2f", analysisResult?.averageDetectionsPerFrame ?? 0))")
 
+            hasUnseenResult = true
             session.finish(success: true)
 
         } catch is CancellationError {
@@ -164,19 +193,25 @@ class VideoAnalysisViewModel {
         }
 
         isAnalyzing = false
+        phase = .idle
         analysisTask = nil
         backgroundSession = nil
     }
 
     /// フレーム抽出の進捗を反映（全体の 0%〜50%）
     private func updateExtractionProgress(current: Int, total: Int) {
-        guard isAnalyzing else { return }
+        guard isAnalyzing, phase == .extracting else { return }
         currentFrame = current
         totalFrames = total
         analysisProgress = Double(current) / Double(total) * 0.5
         backgroundSession?.update(fraction: analysisProgress, subtitle: "フレーム抽出 \(current)/\(total)")
     }
 
+    /// 解析結果を確認済みにする
+    func markResultSeen() {
+        hasUnseenResult = false
+    }
+    
     /// 解析をキャンセル
     func cancelAnalysis() {
         analysisTask?.cancel()
@@ -193,8 +228,9 @@ class VideoAnalysisViewModel {
         detectionResults = []
         selectedFrameIndex = 0
         analysisResult = nil
+        hasUnseenResult = false
     }
-
+    
     /// 次のフレームへ
     func nextFrame() {
         if selectedFrameIndex < detectionResults.count - 1 {
