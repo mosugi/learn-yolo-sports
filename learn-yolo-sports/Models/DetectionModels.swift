@@ -21,15 +21,6 @@ nonisolated struct Detection: Identifiable {
     var confidencePercentage: Int {
         Int(confidence * 100)
     }
-
-    /// 背番号（分かれば）または追跡 ID を含む表示名（例: 自チーム 選手 #10）
-    func label(trackNumbers: [Int: Int]) -> String {
-        guard let trackID, !isExcluded else { return displayName }
-        if let number = trackNumbers[trackID] {
-            return "\(displayName) #\(number)"
-        }
-        return "\(displayName) ID\(trackID)"
-    }
 }
 
 /// サッカー検出モデルのクラスラベル（モデルの names と一致させる）
