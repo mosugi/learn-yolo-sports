@@ -1,0 +1,42 @@
+name: CI
+
+# PR ごとにアプリと UI テストがビルドできることを確認する（署名なし・モデルなし = モックモード）
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Xcode 27 が入ったイメージ（デプロイメントターゲット 26.2 もビルドできる）
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_27.app
+
+      - name: Build app and UI tests
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project learn-yolo-sports.xcodeproj \
+            -scheme learn-yolo-sports \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee build.log | grep -E '(error|warning: .*(concurren|Sendable|isolat)|BUILD|\*\*)' || true
+          grep -q '\*\* TEST BUILD SUCCEEDED \*\*' build.log
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
