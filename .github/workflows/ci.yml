@@ -40,3 +40,30 @@ jobs:
         with:
           name: build-log
           path: build.log
+
+  # スクリーンショット撮影（fastlane snapshot）が通ることを確認し、画像を Artifacts に残す
+  screenshots:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_27.app
+
+      - name: Capture screenshots
+        run: bundle exec fastlane capture
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: |
+            fastlane/screenshots
+            ~/Library/Logs/snapshot
+          if-no-files-found: ignore
