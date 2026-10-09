@@ -1,0 +1,3 @@
+No sign-in is required.
+To try the main feature, tap "動画を選択" (Select Video) on the first tab, pick any soccer match video from the photo library, and tap "解析開始" (Start Analysis). Detection runs entirely on device with a Core ML model.
+The AI advice feature uses Apple Intelligence (Foundation Models) and is available only on supported devices with Apple Intelligence enabled. On other devices the app explains why it is unavailable.

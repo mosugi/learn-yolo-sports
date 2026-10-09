@@ -14,7 +14,7 @@ struct AnalysisResultView: View {
     let frames: [FrameDetectionResult]
     
     @State private var selectedFrameIndex = 0
-    @State private var showingAdvice = false
+    @State private var showingAdvice = LaunchOptions.showsAdvice
     
     private var selectedFrame: FrameDetectionResult? {
         guard frames.indices.contains(selectedFrameIndex) else { return nil }

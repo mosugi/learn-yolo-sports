@@ -76,10 +76,21 @@ learn-yolo-sports/
     └── FootballPlayerDetector.mlpackage  # setup_model.sh で生成（git 管理外）
 scripts/
 └── setup_model.sh                     # モデルのダウンロードと Core ML 変換
+learn-yolo-sportsUITests/
+└── ScreenshotTests.swift              # App Store 用スクリーンショット撮影
+fastlane/                              # TestFlight 配信・申請情報（docs/STORE_RELEASE.md）
+.github/workflows/
+├── ci.yml                             # PR ごとのビルド確認
+└── release.yml                        # fastlane（TestFlight 配信・申請情報の入力）
 docs/
 ├── YOLO_SETUP_GUIDE.md                # YOLOモデルのセットアップ詳細
-└── BUILD_CHECKLIST.md                 # ビルド・稼働確認チェックリスト
+├── BUILD_CHECKLIST.md                 # ビルド・稼働確認チェックリスト
+└── STORE_RELEASE.md                   # App Store 配信（fastlane × GitHub Actions）
 ```
+
+## 📦 App Store 配信
+
+fastlane と GitHub Actions で、TestFlight 配信・申請情報の入力・スクリーンショット撮影を自動化しています。`main` への push で TestFlight に配信されます。初回セットアップと各レーンの説明は [docs/STORE_RELEASE.md](docs/STORE_RELEASE.md) を参照してください。
 
 ## 🚀 使い方
 
