@@ -14,9 +14,26 @@ struct learn_yolo_sportsApp: App {
     @State private var analysisViewModel: VideoAnalysisViewModel
     
     init() {
-        let store = AnalysisStore()
+        guard LaunchOptions.usesDemoData else {
+            let store = AnalysisStore()
+            _store = State(initialValue: store)
+            _analysisViewModel = State(initialValue: VideoAnalysisViewModel(store: store))
+            return
+        }
+        
+        // スクリーンショット用: 実データとは別の一時ディレクトリにデモデータを保存して表示する
+        let directory = URL.temporaryDirectory.appending(path: "DemoAnalyses", directoryHint: .isDirectory)
+        try? FileManager.default.removeItem(at: directory)
+        let store = AnalysisStore(baseURL: directory)
+        let viewModel = VideoAnalysisViewModel(store: store)
+        let demo = DemoData.make()
+        viewModel.showDemo(record: demo.record, frames: demo.frames)
         _store = State(initialValue: store)
-        _analysisViewModel = State(initialValue: VideoAnalysisViewModel(store: store))
+        _analysisViewModel = State(initialValue: viewModel)
+        
+        Task {
+            try? await store.save(demo.record, images: demo.images)
+        }
     }
     
     var body: some Scene {

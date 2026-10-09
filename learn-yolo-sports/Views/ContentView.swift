@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    enum AppTab: Hashable {
+    enum AppTab: String, Hashable {
         case analysis
         case history
         case player
@@ -16,7 +16,7 @@ struct ContentView: View {
     }
     
     @Environment(VideoAnalysisViewModel.self) private var analysisViewModel
-    @State private var selectedTab: AppTab = .analysis
+    @State private var selectedTab = LaunchOptions.initialTab
     
     var body: some View {
         TabView(selection: $selectedTab) {

@@ -221,6 +221,13 @@ class VideoAnalysisViewModel {
         backgroundSession?.update(fraction: analysisProgress, subtitle: "フレーム抽出 \(current)/\(total)")
     }
 
+    /// スクリーンショット用のデモデータを解析結果として表示する
+    func showDemo(record: SavedAnalysis, frames: [FrameDetectionResult]) {
+        videoURL = URL.temporaryDirectory.appending(path: record.videoName)
+        detectionResults = frames
+        currentRecordID = record.id
+    }
+    
     /// 解析結果を確認済みにする
     func markResultSeen() {
         hasUnseenResult = false
