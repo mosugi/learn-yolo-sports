@@ -9,3 +9,15 @@ DerivedData/
 # YOLO モデル (scripts/setup_model.sh で生成)
 .model-build/
 learn-yolo-sports/MLModels/*.mlpackage
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/test_output
+fastlane/.env
+fastlane/screenshots/screenshots.html
+build/
+
+# Bundler
+vendor/
+.bundle/

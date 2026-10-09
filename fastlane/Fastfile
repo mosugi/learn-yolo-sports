@@ -1,0 +1,158 @@
+default_platform(:ios)
+
+platform :ios do
+  # App Store Connect API Key を使った認証（2段階認証を回避できるため推奨）
+  # キー情報は環境変数（CI では GitHub Secrets）から渡す
+  def api_key
+    app_store_connect_api_key(
+      key_id: ENV["ASC_KEY_ID"],
+      issuer_id: ENV["ASC_ISSUER_ID"],
+      key_filepath: ENV["ASC_KEY_FILEPATH"]
+    )
+  end
+
+  desc "ビルド番号を上げてアーカイブを作成し、TestFlight に配信する"
+  lane :beta do
+    # モデル未配置のままビルドするとモック（ランダムな検出結果）で動くアプリが配信されてしまう
+    # レーン内の Ruby コードは fastlane/ ディレクトリで実行される
+    model = "../learn-yolo-sports/MLModels/FootballPlayerDetector.mlpackage"
+    UI.user_error!("YOLO モデルがありません。scripts/setup_model.sh を実行してください") unless File.exist?(model)
+
+    api_key
+
+    increment_build_number(
+      xcodeproj: "learn-yolo-sports.xcodeproj",
+      build_number: latest_testflight_build_number(initial_build_number: 0) + 1
+    )
+
+    # -allowProvisioningUpdates + API キーで Xcode のクラウド署名を使い、
+    # 配布用証明書・プロファイルを CI 上で自動取得する（match 等は不要）
+    build_app(
+      xcargs: [
+        "-allowProvisioningUpdates",
+        "-authenticationKeyPath #{ENV['ASC_KEY_FILEPATH']}",
+        "-authenticationKeyID #{ENV['ASC_KEY_ID']}",
+        "-authenticationKeyIssuerID #{ENV['ASC_ISSUER_ID']}"
+      ].join(" "),
+      export_options: { signingStyle: "automatic", teamID: CredentialsManager::AppfileConfig.try_fetch_value(:team_id) }
+    )
+
+    upload_to_testflight(
+      skip_waiting_for_build_processing: true,
+      changelog: changelog_from_git_commits(commits_count: 5, pretty: "- %s", merge_commit_filtering: "exclude_merges")
+    )
+  end
+
+  desc "審査提出に必要な Store 情報をすべて入力する（提出はしない）"
+  lane :upload_metadata do
+    api_key
+
+    # 説明文・キーワード・URL・著作権・カテゴリ・審査用連絡先・年齢制限・スクリーンショット
+    deliver(
+      skip_binary_upload: true,
+      skip_screenshots: false,
+      overwrite_screenshots: true,
+      skip_metadata: false,
+      app_rating_config_path: "./fastlane/app_rating_config.json",
+      submit_for_review: false,
+      automatic_release: false,
+      run_precheck_before_submit: false,
+      force: true
+    )
+
+    # deliver ではカバーされない項目を App Store Connect API で直接設定する
+    app = Spaceship::ConnectAPI::App.find(CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier))
+    client = Spaceship::ConnectAPI.client.tunes_request_client
+
+    # コンテンツ配信権（サードパーティのコンテンツを含まない）
+    app.update(attributes: { contentRightsDeclaration: "DOES_NOT_USE_THIRD_PARTY_CONTENT" })
+
+    set_free_price(client, app)
+    set_availability(client, app)
+
+    # TestFlight にある最新ビルドを審査対象バージョンに紐付ける
+    version = app.get_edit_app_store_version(platform: Spaceship::ConnectAPI::Platform::IOS)
+    build = app.get_builds(filter: { processingState: "VALID" }, sort: "-uploadedDate", limit: 1).first
+    UI.user_error!("処理済みのビルドがありません") unless build
+    version.select_build(build_id: build.id)
+    UI.success("ビルド #{build.version} をバージョン #{version.version_string} に設定しました")
+  end
+
+  desc "fastlane snapshot で App Store 用スクリーンショットを撮影する（API キー不要）"
+  lane :capture do
+    capture_screenshots
+  end
+
+  desc "fastlane snapshot で App Store 用スクリーンショットを撮影し、Store 情報と一緒にアップロードする"
+  lane :screenshots do
+    capture
+    upload_metadata
+  end
+
+  desc "App のプライバシー（データ収集なし）を入力して公開する"
+  desc "App Store Connect API キーでは操作できないため Apple ID でログインする（FASTLANE_USER に Apple ID を指定）"
+  lane :upload_privacy do
+    upload_app_privacy_details_to_app_store(
+      json_path: "./fastlane/app_privacy_details.json"
+    )
+  end
+
+  # 価格を無料（日本基準）に設定する
+  def set_free_price(client, app)
+    points = client.get("v1/apps/#{app.id}/appPricePoints", { "filter[territory]" => "JPN", "limit" => 200 }).body["data"]
+    free = points.find { |p| p["attributes"]["customerPrice"].to_f.zero? }
+    client.post("v1/appPriceSchedules", {
+      data: {
+        type: "appPriceSchedules",
+        relationships: {
+          app: { data: { type: "apps", id: app.id } },
+          baseTerritory: { data: { type: "territories", id: "JPN" } },
+          manualPrices: { data: [{ type: "appPrices", id: "${price}" }] }
+        }
+      },
+      included: [{
+        type: "appPrices",
+        id: "${price}",
+        attributes: { startDate: nil },
+        relationships: { appPricePoint: { data: { type: "appPricePoints", id: free["id"] } } }
+      }]
+    })
+    UI.success("価格を無料に設定しました")
+  end
+
+  # すべての国・地域で配信可能にする（設定済みなら何もしない）
+  def set_availability(client, app)
+    begin
+      client.get("v1/apps/#{app.id}/appAvailabilityV2")
+      UI.message("配信地域は設定済みです")
+      return
+    rescue StandardError
+    end
+    territories = client.get("v1/territories", { "limit" => 200 }).body["data"].map { |t| t["id"] }
+    client.post("v2/appAvailabilities", {
+      data: {
+        type: "appAvailabilities",
+        attributes: { availableInNewTerritories: true },
+        relationships: {
+          app: { data: { type: "apps", id: app.id } },
+          territoryAvailabilities: { data: territories.map { |t| { type: "territoryAvailabilities", id: "${#{t}}" } } }
+        }
+      },
+      included: territories.map do |t|
+        {
+          type: "territoryAvailabilities",
+          id: "${#{t}}",
+          attributes: { available: true },
+          relationships: { territory: { data: { type: "territories", id: t } } }
+        }
+      end
+    })
+    UI.success("#{territories.size} の国・地域で配信可能にしました")
+  end
+
+  desc "ビルドの作成から TestFlight 配信、Store 情報の入力までを一度に行う"
+  lane :release do
+    beta
+    upload_metadata
+  end
+end
