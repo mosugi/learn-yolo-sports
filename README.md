@@ -34,6 +34,9 @@
 ### 5. バックグラウンド解析と進捗表示
 - 解析中も他のタブを操作可能。アプリをバックグラウンドに移しても `BGContinuedProcessingTask` で解析を継続
 - タブバー上のアクセサリと解析タブのバッジで進捗を表示（どのタブからでもキャンセル可能）
+- 動画の読み込み（iCloud からのダウンロードを含む）中は進捗バー・経過時間・残り時間を表示し、キャンセル可能
+- 解析前に動画の長さ・解像度・解析フレーム数と所要時間の目安を表示（前回の解析で計測した処理速度から算出）
+- 解析中は経過時間と残り時間を表示。進捗バーの配分も実測の処理時間に合わせて調整
 
 ### 6. 解析結果の保存と共有
 - 解析完了時に自動保存し、「履歴」タブから見返し・削除が可能
@@ -54,6 +57,7 @@ learn-yolo-sports/
 │   └── AnalysisMetrics.swift          # 位置・密集度などの指標
 ├── Services/
 │   ├── VideoFrameExtractor.swift      # フレーム抽出
+│   ├── VideoImporter.swift            # 動画の取り込みと進捗
 │   ├── YOLODetector.swift             # YOLO検出エンジン
 │   ├── ContinuedProcessingSession.swift # バックグラウンド継続
 │   ├── AnalysisStore.swift            # 解析結果の保存

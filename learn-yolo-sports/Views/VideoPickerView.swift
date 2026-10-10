@@ -12,7 +12,7 @@ import AVFoundation
 struct VideoPickerView: View {
     @State private var selectedVideoItem: PhotosPickerItem?
     @State private var videoURL: URL?
-    @State private var isLoading = false
+    @State private var importer = VideoImporter()
     @State private var errorMessage: String?
     
     var body: some View {
@@ -90,8 +90,8 @@ struct VideoPickerView: View {
                     }
                 }
                 
-                if isLoading {
-                    ProgressView("動画を読み込み中...")
+                if importer.isLoading {
+                    loadingProgress
                         .padding()
                 }
                 
@@ -114,31 +114,54 @@ struct VideoPickerView: View {
         }
     }
     
+    /// 読み込みの進捗バー
+    private var loadingProgress: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+            VStack(spacing: 8) {
+                if let fraction = importer.fraction {
+                    ProgressView(value: fraction) {
+                        Text("動画を読み込み中...")
+                    } currentValueLabel: {
+                        HStack {
+                            Text("\(Int(fraction * 100))%")
+                            Spacer()
+                            if let remaining = importer.estimatedRemaining(now: context.date) {
+                                Text("残り\(DurationText.approximate(remaining))")
+                            }
+                        }
+                        .monospacedDigit()
+                    }
+                } else {
+                    ProgressView("動画を読み込み中...")
+                }
+                
+                Button("キャンセル", role: .cancel) {
+                    importer.cancel()
+                    selectedVideoItem = nil
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal, 40)
+    }
+    
     private func loadVideo(from item: PhotosPickerItem?) async {
         guard let item = item else { return }
         
-        isLoading = true
         errorMessage = nil
         
         do {
             // 動画データを取得
-            guard let movie = try await item.loadTransferable(type: VideoTransferable.self) else {
-                errorMessage = "動画の読み込みに失敗しました"
-                isLoading = false
-                return
-            }
-            
+            let movie = try await importer.load(item)
             videoURL = movie.url
-            isLoading = false
             
             // 動画情報を取得
-            if let url = videoURL {
-                await printVideoInfo(url: url)
-            }
+            await printVideoInfo(url: movie.url)
             
+        } catch is CancellationError {
+            // ユーザーが読み込みをキャンセルした
         } catch {
             errorMessage = "エラー: \(error.localizedDescription)"
-            isLoading = false
         }
     }
     
