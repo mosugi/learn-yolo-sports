@@ -15,6 +15,8 @@ struct VideoAnalysisView: View {
     @State private var showingSettings = false
     @State private var framesPerSecond = 2
     @State private var maxFrames = 30
+    @State private var importer = VideoImporter()
+    @State private var videoInfo: VideoInfo?
     
     var body: some View {
         NavigationStack {
@@ -22,6 +24,9 @@ struct VideoAnalysisView: View {
                 if let _ = viewModel.videoURL, viewModel.hasResults {
                     // 解析結果表示
                     analysisResultView
+                } else if importer.isLoading {
+                    // フォトライブラリから読み込み中
+                    videoLoadingView
                 } else if viewModel.videoURL != nil {
                     // 動画選択済み（解析待ち・解析中）
                     analysisSetupView
@@ -56,6 +61,11 @@ struct VideoAnalysisView: View {
             }
             .task {
                 await viewModel.checkModel()
+            }
+            .task(id: viewModel.videoURL) {
+                videoInfo = nil
+                guard let url = viewModel.videoURL else { return }
+                videoInfo = try? await VideoInfo.load(from: url)
             }
             .sheet(isPresented: $showingSettings) {
                 settingsSheet
@@ -112,6 +122,74 @@ struct VideoAnalysisView: View {
                     .cornerRadius(12)
             }
             .padding(.horizontal, 40)
+            
+            if let errorMessage = viewModel.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+        }
+    }
+    
+    // MARK: - Video Loading View
+    
+    /// フォトライブラリ（iCloud を含む）から動画を取り込んでいる間の表示
+    private var videoLoadingView: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+            VStack(spacing: 16) {
+                Image(systemName: "icloud.and.arrow.down")
+                    .font(.system(size: 60))
+                    .foregroundStyle(.blue)
+                    .symbolEffect(.pulse, options: .repeating)
+                
+                Text("動画を読み込み中")
+                    .font(.headline)
+                
+                if let fraction = importer.fraction {
+                    VStack(spacing: 6) {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                        
+                        HStack {
+                            Text("\(Int(fraction * 100))%")
+                                .monospacedDigit()
+                            Spacer()
+                            if let remaining = importer.estimatedRemaining(now: context.date) {
+                                Text("残り\(DurationText.approximate(remaining))")
+                                    .monospacedDigit()
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ProgressView()
+                    Text("準備中...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                
+                if let startDate = importer.startDate {
+                    Text("経過 \(DurationText.clock(context.date.timeIntervalSince(startDate)))")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                
+                Text("iCloud に保存されている動画は、ダウンロードに時間がかかることがあります")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                
+                Button("キャンセル", role: .cancel) {
+                    importer.cancel()
+                    selectedVideoItem = nil
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.horizontal, 40)
         }
     }
     
@@ -132,12 +210,32 @@ struct VideoAnalysisView: View {
                         .font(.headline)
                         .lineLimit(1)
                     
+                    if let videoInfo {
+                        videoInfoRow(videoInfo)
+                    }
+                    
                     HStack(spacing: 20) {
                         Label("\(framesPerSecond) FPS", systemImage: "film")
-                        Label("最大 \(maxFrames) フレーム", systemImage: "photo.stack")
+                        if let videoInfo {
+                            Label("\(videoInfo.expectedFrameCount(fps: framesPerSecond, maxFrames: maxFrames)) フレームを解析", systemImage: "photo.stack")
+                        } else {
+                            Label("最大 \(maxFrames) フレーム", systemImage: "photo.stack")
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    
+                    if !viewModel.isAnalyzing, let videoInfo {
+                        if let estimate = viewModel.estimatedDuration(for: videoInfo, framesPerSecond: framesPerSecond, maxFrames: maxFrames) {
+                            Label("所要時間の目安 \(DurationText.approximate(estimate))", systemImage: "clock")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Label("所要時間は初回の解析で計測します", systemImage: "clock")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     
                     if let isUsingRealModel = viewModel.isUsingRealModel {
                         Label(
@@ -167,6 +265,20 @@ struct VideoAnalysisView: View {
             
             Spacer()
         }
+    }
+    
+    /// 動画の長さ・解像度・サイズ
+    private func videoInfoRow(_ info: VideoInfo) -> some View {
+        HStack(spacing: 12) {
+            Label(DurationText.clock(info.duration), systemImage: "timer")
+            Text("\(Int(info.size.width))×\(Int(info.size.height))")
+            if let fileSize = info.fileSize {
+                Text(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))
+            }
+        }
+        .font(.caption)
+        .monospacedDigit()
+        .foregroundStyle(.secondary)
     }
     
     private func startButton(url: URL) -> some View {
@@ -229,8 +341,22 @@ struct VideoAnalysisView: View {
             ProgressView(value: viewModel.analysisProgress)
                 .progressViewStyle(.linear)
             
+            // 経過時間と残り時間は 1 秒ごとに更新する
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack {
+                    if let startDate = viewModel.analysisStartDate {
+                        Text("経過 \(DurationText.clock(context.date.timeIntervalSince(startDate)))")
+                    }
+                    Spacer()
+                    Text(remainingText(now: context.date))
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            }
+            
             HStack {
-                Text("フレーム \(viewModel.currentFrame) / \(viewModel.totalFrames)")
+                Text(viewModel.phase == .saving ? "結果を保存中" : "フレーム \(viewModel.currentFrame) / \(viewModel.totalFrames)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -250,6 +376,16 @@ struct VideoAnalysisView: View {
         .cornerRadius(12)
     }
     
+    private func remainingText(now: Date) -> String {
+        if viewModel.phase == .saving {
+            return "まもなく完了"
+        }
+        guard let remaining = viewModel.estimatedRemaining(now: now) else {
+            return "残り時間を計算中"
+        }
+        return remaining < 1 ? "まもなく完了" : "残り\(DurationText.approximate(remaining))"
+    }
+    
     // MARK: - Settings Sheet
     
     private var settingsSheet: some View {
@@ -258,6 +394,17 @@ struct VideoAnalysisView: View {
                 Section("抽出設定") {
                     Stepper("フレームレート: \(framesPerSecond) FPS", value: $framesPerSecond, in: 1...10)
                     Stepper("最大フレーム数: \(maxFrames)", value: $maxFrames, in: 10...100, step: 10)
+                }
+                
+                if let videoInfo {
+                    Section("見積もり") {
+                        LabeledContent("解析フレーム数", value: "\(videoInfo.expectedFrameCount(fps: framesPerSecond, maxFrames: maxFrames))")
+                        LabeledContent(
+                            "所要時間の目安",
+                            value: viewModel.estimatedDuration(for: videoInfo, framesPerSecond: framesPerSecond, maxFrames: maxFrames)
+                                .map(DurationText.approximate) ?? "初回の解析で計測します"
+                        )
+                    }
                 }
                 
                 Section("説明") {
@@ -283,15 +430,13 @@ struct VideoAnalysisView: View {
     
     private func loadVideo(from item: PhotosPickerItem?) async {
         guard let item = item else { return }
+        viewModel.errorMessage = nil
         
         do {
-            guard let movie = try await item.loadTransferable(type: VideoTransferable.self) else {
-                viewModel.errorMessage = "動画の読み込みに失敗しました"
-                return
-            }
-            
+            let movie = try await importer.load(item)
             viewModel.videoURL = movie.url
-            
+        } catch is CancellationError {
+            // ユーザーが読み込みをキャンセルした
         } catch {
             viewModel.errorMessage = "エラー: \(error.localizedDescription)"
         }

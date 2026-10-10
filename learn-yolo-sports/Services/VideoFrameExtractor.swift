@@ -19,6 +19,9 @@ nonisolated struct ExtractedFrame {
 /// 動画からフレームを抽出するクラス
 actor VideoFrameExtractor {
     
+    /// フレームごとに作り直すと重いため使い回す
+    private let ciContext = CIContext()
+    
     /// フレーム抽出の進捗を通知するクロージャ
     typealias ProgressHandler = @Sendable (Int, Int) async -> Void
     
@@ -75,6 +78,10 @@ actor VideoFrameExtractor {
         var frameCount = 0
         let frameInterval = max(1, Int(nominalFrameRate) / max(1, fps)) // 抽出間隔
         
+        // 実際に抽出されるフレーム数（短い動画では maxFrames に届かないため、進捗の分母に使う）
+        let sourceFrameCount = Int((durationSeconds * Double(nominalFrameRate)).rounded(.up))
+        let expectedFrames = max(1, min(maxFrames, Int((Double(sourceFrameCount) / Double(frameInterval)).rounded(.up))))
+        
         // フレームを抽出
         while let sampleBuffer = output.copyNextSampleBuffer() {
             try Task.checkCancellation()
@@ -87,9 +94,10 @@ actor VideoFrameExtractor {
                     frames.append(ExtractedFrame(image: cgImage, timestamp: CMTimeGetSeconds(time)))
                     
                     // 進捗を通知
-                    await progressHandler?(frames.count, maxFrames)
+                    // 見積もりより多く取れた場合も分母を超えないようにする
+                    await progressHandler?(frames.count, max(expectedFrames, frames.count))
                     
-                    print("🎬 フレーム抽出: \(frames.count)/\(maxFrames)")
+                    print("🎬 フレーム抽出: \(frames.count)/\(expectedFrames)")
                     
                     // 最大フレーム数に達したら終了
                     if frames.count >= maxFrames {
@@ -129,9 +137,8 @@ actor VideoFrameExtractor {
         }
         
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext()
         
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
             return nil
         }
         
@@ -144,6 +151,7 @@ enum FrameExtractionError: Error, LocalizedError {
     case noVideoTrack
     case failedToCreateReader
     case failedToCreateImage
+    case noFrames
     
     var errorDescription: String? {
         switch self {
@@ -153,6 +161,8 @@ enum FrameExtractionError: Error, LocalizedError {
             return "動画リーダーの作成に失敗しました"
         case .failedToCreateImage:
             return "画像の作成に失敗しました"
+        case .noFrames:
+            return "動画からフレームを取得できませんでした"
         }
     }
 }
