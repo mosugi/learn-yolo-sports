@@ -15,6 +15,8 @@ struct VideoAnalysisView: View {
     @Environment(VideoAnalysisViewModel.self) private var viewModel
     @Environment(AnalysisStore.self) private var store
     @State private var selectedVideoItem: PhotosPickerItem?
+    /// 1チームの人数（識別する選手の数の上限）
+    @AppStorage(AnalysisSettings.playersPerTeamKey) private var playersPerTeam = PlayerTracker.defaultPlayersPerTeam
     /// 動画読み込み（フォトライブラリからのコピー。iCloud にしかない場合はダウンロードも含む）の進捗
     @State private var importer = VideoImporter()
 
@@ -96,6 +98,19 @@ struct VideoAnalysisView: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
                 }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("1チームの人数")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Picker("1チームの人数", selection: $playersPerTeam) {
+                        ForEach(AnalysisSettings.playersPerTeamOptions, id: \.self) { count in
+                            Text(AnalysisSettings.label(forPlayersPerTeam: count)).tag(count)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                .padding(.horizontal, 40)
 
                 PhotosPicker(
                     selection: $selectedVideoItem,

@@ -75,24 +75,25 @@ nonisolated enum PlayerTracker {
     static let colorConflictStrength = 0.3
     /// 色が食い違う観測を対応付けるときに足す距離（身長単位）
     static let colorConflictPenalty = 1.5
-    /// 背番号が読めなかった選手に記号を付ける最短の写っていた時間（秒）
-    ///
-    /// カメラが動くと、画面外に出て戻った選手は別の追跡になる。短い断片にまで記号を付けると
-    /// 呼び名が増えすぎるため、ある程度続けて写っていた選手だけにする（他はチームの色だけで表示する）。
-    static let minimumLetteredDuration = 5.0
+    /// 選手の枠に割り当てる最短の追跡の長さ（秒）。これより短い断片はチームの色だけで表示する
+    static let minimumSlotDuration = 2.0
+    /// 選手の枠の数（1チームの人数）の既定値
+    static let defaultPlayersPerTeam = 11
 
     /// - Parameters:
     ///   - frames: 時刻順のフレーム（検出は正規化座標）
     ///   - aspectRatio: 画像の幅 / 高さ
-    static func analyze(frames: [SavedFrame], aspectRatio: Double) -> PlayerTrackingResult {
+    ///   - playersPerTeam: 1チームの人数（GK を含む。8人制なら 8）。識別する選手の数の上限になる
+    static func analyze(frames: [SavedFrame], aspectRatio: Double, playersPerTeam: Int = defaultPlayersPerTeam) -> PlayerTrackingResult {
         let aspect = aspectRatio > 0 ? aspectRatio : 16.0 / 9.0
+        let fieldSlots = max(1, playersPerTeam - 1)
 
         // 白線の外も芝が続く会場では、床の色だけでは観客や控えの選手を除けない。
         // 一度全員で追跡し、周りが動いているのに動かない人を見つけたら、その人を除いて
         // チームの色・追跡・呼び名を求め直す（観客の服の色がチームの色に混ざらないように）
-        let first = analyze(frames: frames, aspect: aspect, excluded: [:])
+        let first = analyze(frames: frames, aspect: aspect, fieldSlots: fieldSlots, excluded: [:])
         guard !first.stationary.isEmpty else { return first.result }
-        var result = analyze(frames: frames, aspect: aspect, excluded: first.stationary).result
+        var result = analyze(frames: frames, aspect: aspect, fieldSlots: fieldSlots, excluded: first.stationary).result
         result.excluded = first.stationary
         return result
     }
@@ -102,6 +103,7 @@ nonisolated enum PlayerTracker {
     private static func analyze(
         frames: [SavedFrame],
         aspect: Double,
+        fieldSlots: Int,
         excluded: [Int: Set<Int>]
     ) -> (result: PlayerTrackingResult, stationary: [Int: Set<Int>]) {
         // 1. 人の観測を集める（コート外は除く）。画面が切り替わったら区間を分ける
@@ -155,8 +157,8 @@ nonisolated enum PlayerTracker {
             tracks[index].team = (tracks[index].isGoalkeeper || tracks[index].isReferee) ? nil : tracks[index].colorTeam
         }
 
-        // 4. 選手ごとに一意の呼び名を付ける
-        let (players, playerOfTrack) = identify(tracks, frames: frames, observations: observations)
+        // 4. 1チームの人数を上限に、途切れた追跡を同じ選手にまとめて呼び名を付ける
+        let (players, playerOfTrack, extraTracks) = identify(tracks, observations: observations, fieldSlots: fieldSlots)
 
         var assignments: [Int: [Int: PlayerTrackingResult.Assignment]] = [:]
         for track in tracks {
@@ -171,7 +173,10 @@ nonisolated enum PlayerTracker {
         }
 
         var stationary: [Int: Set<Int>] = [:]
-        for index in Set(stationaryTracks(tracks)).union(foregroundTracks(tracks, observations: observations)) {
+        let offPitch = Set(stationaryTracks(tracks))
+            .union(foregroundTracks(tracks, observations: observations))
+            .union(extraTracks)
+        for index in offPitch {
             for point in tracks[index].points {
                 stationary[point.frame, default: []].insert(observations[point.frame][point.observation].detectionIndex)
             }
@@ -275,19 +280,84 @@ nonisolated enum PlayerTracker {
 
     // MARK: - Identity
 
-    /// 追跡に背番号・記号を割り当てる
-    ///
-    /// - 同じチーム・同じ背番号の追跡は、時間が重ならなければ同じ選手（つなぎ直せなかった追跡）とみなす。
-    /// - 時間が重なる場合は、背番号の票が多い方だけをその背番号にし、残りは記号で呼ぶ。
-    /// - 記号は登場順に A, B, C… と付け、チームをまたいでも重複させない。
-    private static func identify(_ tracks: [Track], frames: [SavedFrame], observations: [[Observation]]) -> ([PlayerIdentity], [Int: Int]) {
-        var players: [PlayerIdentity] = []
-        var playerOfTrack: [Int: Int] = [:]
+    /// 新しい選手の枠を使う代わりに、既存の枠へつなぐときの費用の上限
+    static let newSlotCost = 1.0
 
+    /// 追跡を選手に割り当てる
+    ///
+    /// カメラが動くと、画面外に出て戻った選手は別の追跡になる。追跡ごとに呼び名を付けると
+    /// 10 分の動画で数百人になるため、チームごとに人数分の「枠」を用意し、時間が重ならない追跡を
+    /// 同じ枠（同じ選手）にまとめる。
+    /// - 長く写っていた追跡から順に、前後の追跡と位置が最も自然につながる枠に入れる。
+    /// - 背番号が食い違う枠には入れない。同じ背番号の枠は優先する。
+    /// - どの枠とも時間が重なる追跡は、人数を超えて写っている人（控え・観客など）とみなす。
+    /// - Returns: 選手、追跡 ID ごとの選手 ID、人数を超えた追跡の ID
+    private static func identify(
+        _ tracks: [Track],
+        observations: [[Observation]],
+        fieldSlots: Int
+    ) -> ([PlayerIdentity], [Int: Int], [Int]) {
         func duration(_ track: Track) -> Double { track.last.time - track.first.time }
         func overlaps(_ a: Track, _ b: Track) -> Bool {
             a.first.time <= b.last.time && b.first.time <= a.last.time
         }
+        /// a の終わりから b の始まりへ、同じ人が移動できたか（1 以下なら無理がない）
+        func linkCost(from a: Track, to b: Track) -> Double {
+            let gap = max(0, b.first.time - a.last.time)
+            let height = (a.last.height + b.first.height) / 2
+            let reach = positionTolerance + maxSpeed * min(gap, maxStitchGap)
+            // 長く離れていた追跡ほど、位置からは同じ人と言い切れないため少し費用を足す
+            return distance(a.last.position, b.first.position, height: height) / reach + gap / 120
+        }
+        /// 背番号の票をまとめて、過半数を占める背番号（2回以上読めたもの）
+        func number(of members: [Track]) -> (number: Int, votes: Int)? {
+            var votes: [Int: Int] = [:]
+            for member in members { votes.merge(member.numberVotes, uniquingKeysWith: +) }
+            let total = votes.values.reduce(0, +)
+            guard let best = votes.max(by: { $0.value < $1.value }),
+                  best.value >= 2, Double(best.value) / Double(total) >= 0.6 else { return nil }
+            return (best.key, best.value)
+        }
+
+        var slotsByTeam: [Int: [[Track]]] = [:]
+        var extraTracks: [Int] = []
+
+        for team in [0, 1] {
+            var slots: [[Track]] = []
+            let candidates = tracks
+                .filter { !$0.isGoalkeeper && !$0.isReferee && $0.team == team && duration($0) >= minimumSlotDuration }
+                .sorted { duration($0) > duration($1) }
+
+            for track in candidates {
+                var best: (slot: Int, cost: Double)?
+                for (index, members) in slots.enumerated() {
+                    guard !members.contains(where: { overlaps($0, track) }) else { continue }
+                    let slotNumber = number(of: members)?.number
+                    if let slotNumber, let own = track.jerseyNumber, slotNumber != own { continue }
+
+                    let previous = members.last { $0.last.time < track.first.time }
+                    let next = members.first { $0.first.time > track.last.time }
+                    var cost = [previous.map { linkCost(from: $0, to: track) }, next.map { linkCost(from: track, to: $0) }]
+                        .compactMap { $0 }
+                        .min() ?? newSlotCost
+                    if let slotNumber, slotNumber == track.jerseyNumber { cost -= 1 }
+                    if best == nil || cost < best!.cost { best = (index, cost) }
+                }
+
+                if slots.count < fieldSlots, best == nil || best!.cost > newSlotCost {
+                    slots.append([track])
+                } else if let best {
+                    slots[best.slot].append(track)
+                    slots[best.slot].sort { $0.first.time < $1.first.time }
+                } else {
+                    extraTracks.append(track.id)
+                }
+            }
+            slotsByTeam[team] = slots
+        }
+
+        var players: [PlayerIdentity] = []
+        var playerOfTrack: [Int: Int] = [:]
         func makeIdentity(_ members: [Track], team: Int?, number: Int?, letter: String?, isGoalkeeper: Bool) {
             let id = players.count
             players.append(PlayerIdentity(
@@ -305,31 +375,31 @@ nonisolated enum PlayerTracker {
             }
         }
 
-        // 背番号の付いた追跡を、票の多い順に (チーム, 背番号) へ割り当てる
-        var numbered: [String: [Track]] = [:]
-        var unnumbered: [Track] = []
-        let fieldTracks = tracks.filter { !$0.isGoalkeeper && !$0.isReferee && $0.team != nil }
-        for track in fieldTracks.sorted(by: { $0.jerseyNumberVotes > $1.jerseyNumberVotes }) {
-            guard let number = track.jerseyNumber, let team = track.team else {
-                unnumbered.append(track)
-                continue
+        // 同じチームで背番号が重なった枠は、票の多い方だけをその背番号にする
+        var labeled: [(team: Int, members: [Track], number: Int?)] = []
+        for team in [0, 1] {
+            var usedNumbers: Set<Int> = []
+            let slots = (slotsByTeam[team] ?? []).map { ($0, number(of: $0)) }
+                .sorted { ($0.1?.votes ?? 0) > ($1.1?.votes ?? 0) }
+            for (members, found) in slots {
+                var assigned: Int?
+                if let found, !usedNumbers.contains(found.number) {
+                    usedNumbers.insert(found.number)
+                    assigned = found.number
+                }
+                labeled.append((team, members, assigned))
             }
-            let key = "\(team)-\(number)"
-            if numbered[key, default: []].contains(where: { overlaps($0, track) }) {
-                unnumbered.append(track)
-            } else {
-                numbered[key, default: []].append(track)
-            }
-        }
-        for members in numbered.values.sorted(by: { $0.map(\.first.time).min()! < $1.map(\.first.time).min()! }) {
-            makeIdentity(members, team: members[0].team, number: members[0].jerseyNumber, letter: nil, isGoalkeeper: false)
         }
 
-        // 背番号のない追跡は、ある程度の時間写っていたものだけ記号で呼ぶ
+        // 背番号のある選手、記号の選手（登場順に A, B, C…）の順に作る
         var letterIndex = 0
-        for track in unnumbered.sorted(by: { $0.first.time < $1.first.time }) where duration(track) >= minimumLetteredDuration {
-            makeIdentity([track], team: track.team, number: nil, letter: letterName(letterIndex), isGoalkeeper: false)
-            letterIndex += 1
+        for entry in labeled.sorted(by: { $0.members[0].first.time < $1.members[0].first.time }) {
+            if let number = entry.number {
+                makeIdentity(entry.members, team: entry.team, number: number, letter: nil, isGoalkeeper: false)
+            } else {
+                makeIdentity(entry.members, team: entry.team, number: nil, letter: letterName(letterIndex), isGoalkeeper: false)
+                letterIndex += 1
+            }
         }
 
         // GK は画面の左右で呼び分ける（両方のゴール前が同時に写ることは少ないため）
@@ -345,7 +415,7 @@ nonisolated enum PlayerTracker {
             makeIdentity(members, team: nil, number: members.compactMap(\.jerseyNumber).first, letter: side, isGoalkeeper: true)
         }
 
-        return (players, playerOfTrack)
+        return (players, playerOfTrack, extraTracks)
     }
 
     /// 0 → A, 25 → Z, 26 → AA

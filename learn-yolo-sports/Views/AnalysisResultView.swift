@@ -361,12 +361,49 @@ struct AnalysisResultView: View {
                 Text("背番号が読めた選手は #番号、読めなかった選手は登場順に A, B, C… で呼んでいます。タップするとその選手にマーカーを付け続け、動きへのアドバイスを作成します（もう一度タップで解除）。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+
+                reidentifyMenu
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
             .background(Color(.secondarySystemBackground))
             .cornerRadius(12)
             .padding(.horizontal)
+        }
+    }
+
+    /// 1チームの人数を指定して選手の識別だけをやり直す（検出はやり直さないためすぐ終わる）
+    @ViewBuilder
+    private var reidentifyMenu: some View {
+        if viewModel.reidentifyingRecordID == record.id {
+            HStack(spacing: 8) {
+                ProgressView()
+                Text("選手の識別をやり直しています...")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Menu {
+                ForEach(AnalysisSettings.playersPerTeamOptions, id: \.self) { count in
+                    Button {
+                        focusPath = nil
+                        viewModel.reidentifyPlayers(recordID: record.id, playersPerTeam: count)
+                    } label: {
+                        if record.playersPerTeam == count {
+                            Label(AnalysisSettings.label(forPlayersPerTeam: count), systemImage: "checkmark")
+                        } else {
+                            Text(AnalysisSettings.label(forPlayersPerTeam: count))
+                        }
+                    }
+                }
+            } label: {
+                Label(
+                    record.playersPerTeam.map { "\(AnalysisSettings.label(forPlayersPerTeam: $0))で識別済み・人数を変えて識別し直す" }
+                        ?? "1チームの人数を指定して識別し直す",
+                    systemImage: "person.2.badge.gearshape"
+                )
+                .font(.caption)
+            }
         }
     }
 

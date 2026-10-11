@@ -344,10 +344,14 @@ final class VideoAnalysisViewModel {
                 checkpoint.updatedAt = Date()
                 try store.updateCheckpoint(checkpoint)
 
+                if checkpoint.playersPerTeam == nil {
+                    checkpoint.playersPerTeam = AnalysisSettings.playersPerTeam
+                }
+                let playersPerTeam = checkpoint.playersPerTeam ?? AnalysisSettings.playersPerTeam
                 let detectedFrames = frames
                 let (tracked, result) = await Task.detached(priority: .userInitiated) {
                     var tracked = detectedFrames
-                    let result = PlayerTracker.analyze(frames: tracked, aspectRatio: aspectRatio)
+                    let result = PlayerTracker.analyze(frames: tracked, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
                     result.apply(to: &tracked)
                     return (tracked, result)
                 }.value
@@ -386,6 +390,7 @@ final class VideoAnalysisViewModel {
                 players: players,
                 segments: segments
             )
+            record.playersPerTeam = checkpoint.playersPerTeam
 
             var adviceFailureReason: String? = IntelligenceAdvisor.unavailableReason
             // バックグラウンドでは生成が制限されるため、一度制限されたら残りはアプリを開いたときに作る
@@ -677,6 +682,54 @@ final class VideoAnalysisViewModel {
 
     private nonisolated static func aspectRatio(width: Int, height: Int) -> Double {
         width > 0 && height > 0 ? Double(width) / Double(height) : 16.0 / 9.0
+    }
+
+    // MARK: - Re-identification
+
+    /// 選手の識別をやり直している解析結果
+    private(set) var reidentifyingRecordID: UUID?
+
+    /// 保存済みの解析結果で、1チームの人数を指定して選手の識別だけをやり直す（検出はやり直さない）
+    ///
+    /// 選手が変わるため、選択肢の矢印は計算し直し、選手のアドバイスと選択肢への AI の評価は消す。
+    func reidentifyPlayers(recordID: UUID, playersPerTeam: Int) {
+        guard reidentifyingRecordID == nil, let record = store.record(for: recordID) else { return }
+        reidentifyingRecordID = recordID
+
+        Task {
+            defer { self.reidentifyingRecordID = nil }
+            let aspectRatio = Self.aspectRatio(width: record.imageWidth, height: record.imageHeight)
+            let (frames, result) = await Task.detached(priority: .userInitiated) {
+                var frames = record.frames
+                let result = PlayerTracker.analyze(frames: frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
+                result.apply(to: &frames)
+                return (frames, result)
+            }.value
+
+            guard var updated = self.store.record(for: recordID) else { return }
+            updated.frames = frames
+            updated.teams = result.teams
+            updated.players = result.players
+            updated.playersPerTeam = playersPerTeam
+            updated.playerAdvice = nil
+            updated.segments = updated.segments?.map { segment in
+                var segment = segment
+                segment.tactics = TacticalPlanner.snapshot(
+                    for: segment,
+                    frames: frames.filter { segment.contains($0.timestamp) },
+                    aspectRatio: aspectRatio,
+                    players: result.players
+                )
+                segment.commentary?.optionComments = nil
+                segment.commentary?.recommendedOptionID = nil
+                return segment
+            }
+            do {
+                try self.store.update(updated)
+            } catch {
+                self.errorMessage = "エラー: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - Advice retry
