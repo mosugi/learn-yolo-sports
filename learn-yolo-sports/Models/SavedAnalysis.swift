@@ -97,6 +97,16 @@ nonisolated struct AnalysisAdvice: Codable, Hashable {
     let generatedAt: Date
 }
 
+/// 指定した選手の動きへのアドバイス（選手を指定したときにだけ生成する）
+nonisolated struct PlayerAdvice: Codable, Hashable {
+    /// PlayerIdentity.id
+    let playerID: Int
+    let summary: String
+    let strengths: [String]
+    let improvements: [String]
+    let generatedAt: Date
+}
+
 /// 保存された解析結果
 nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     let id: UUID
@@ -124,6 +134,8 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     var segments: [SceneSegment]? = nil
     /// シーン解説や総評が生成できなかった理由（Apple Intelligence 利用不可など）
     var adviceUnavailableReason: String? = nil
+    /// 選手ごとのアドバイス（指定された選手の分だけ）
+    var playerAdvice: [PlayerAdvice]? = nil
 
     // MARK: - 集計
     

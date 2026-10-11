@@ -40,6 +40,19 @@ nonisolated struct GeneratedSceneCommentary {
     var recommendedOption: Int
 }
 
+/// オンデバイス LLM に生成させる選手個人へのアドバイスの構造
+@Generable
+nonisolated struct GeneratedPlayerAdvice {
+    @Guide(description: "この選手の動きの総評。2〜3文の日本語")
+    var summary: String
+
+    @Guide(description: "指標から読み取れる良い点。根拠となる数値に触れた短い日本語の文", .count(2))
+    var strengths: [String]
+
+    @Guide(description: "次の試合で意識するとよい具体的な改善点。短い日本語の文", .count(3))
+    var improvements: [String]
+}
+
 /// Apple Intelligence（Foundation Models）を使って解析結果へのアドバイスを生成する
 ///
 /// UI の状態は持たず、ViewModel のパイプラインから呼ばれる async なサービス。
@@ -107,6 +120,20 @@ nonisolated enum IntelligenceAdvisor {
         )
     }
 
+    /// 指定した選手の動きへのアドバイスを生成する
+    static func playerAdvice(metrics: PlayerMetrics, usedRealModel: Bool) async throws -> PlayerAdvice {
+        let session = LanguageModelSession(instructions: instructions)
+        let response = try await session.respond(to: playerPrompt(metrics: metrics, usedRealModel: usedRealModel), generating: GeneratedPlayerAdvice.self)
+        let generated = response.content
+        return PlayerAdvice(
+            playerID: metrics.player.id,
+            summary: generated.summary,
+            strengths: generated.strengths,
+            improvements: generated.improvements,
+            generatedAt: Date()
+        )
+    }
+
     /// エラーを表示用の日本語メッセージに変換する
     static func errorMessage(for error: Error) -> String {
         if let generationError = error as? LanguageModelSession.GenerationError {
@@ -155,6 +182,21 @@ nonisolated enum IntelligenceAdvisor {
         lines.append(tacticsText(segment.tactics, teams: teams))
         lines.append("")
         lines.append("この場面の見出し、状況説明、具体的なアドバイス、選択肢の候補それぞれへの評価とおすすめの番号を作成してください。")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func playerPrompt(metrics: PlayerMetrics, usedRealModel: Bool) -> String {
+        var lines: [String] = []
+        lines.append("以下はサッカー動画を物体検出・追跡して得た、1人の選手の動きの指標です。")
+        if !usedRealModel {
+            lines.append("（注意: これはテスト用のランダムな検出結果です）")
+        }
+        lines.append("")
+        lines.append(metrics.summaryText)
+        lines.append("")
+        lines.append("距離と速さは、写っている選手の身長を\(PlayerMetrics.assumedHeight)mと仮定した目安です。位置はカメラ画面上の位置で、ピッチ上の絶対位置ではありません。")
+        lines.append("カメラに写っていない間の動きは含みません。")
+        lines.append("この指標から、この選手の動きの総評、良い点、次の試合での改善点を、本人に話しかけるように作成してください。")
         return lines.joined(separator: "\n")
     }
 
