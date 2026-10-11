@@ -82,6 +82,10 @@ nonisolated enum MatchAnalyzer {
     static let transitionDuration = 3.0
     /// 途切れた追跡をつなぎ直す最大の間隔（秒）
     static let maxStitchGap = 3.0
+    /// 追跡の色と食い違うとみなす観測の票の強さ
+    static let colorConflictStrength = 0.3
+    /// 色が食い違う観測を対応付けるときに足す距離（m）
+    static let colorConflictPenalty = 3.0
 
     static func analyze(frames: [ProcessedFrame], setup: AnalysisSetup) -> MatchAnalysisResult {
         let valid = frames.filter { !$0.cameraMoved }.sorted { $0.timestamp < $1.timestamp }
@@ -93,12 +97,14 @@ nonisolated enum MatchAnalyzer {
             for (index, detection) in frame.detections.enumerated() {
                 guard detection.inCourt == true, let position = detection.pitchPosition else { continue }
                 switch detection.sportsClass {
-                case .player?, .goalkeeper?:
+                case .player?, .goalkeeper?, .referee?:
                     list.append(Observation(
                         detectionIndex: index,
                         position: position,
-                        color: detection.jerseyColor,
+                        palette: detection.jerseyPalette ?? [],
+                        boxHeight: Double(detection.boundingBox.height),
                         isGoalkeeper: detection.sportsClass == .goalkeeper,
+                        isReferee: detection.sportsClass == .referee,
                         jerseyNumber: detection.jerseyNumber
                     ))
                 default:
@@ -108,29 +114,15 @@ nonisolated enum MatchAnalyzer {
             observations.append(list)
         }
 
-        // 2. ユニフォームの色でチームを分ける
-        let colors = observations.flatMap { $0.filter { !$0.isGoalkeeper }.compactMap(\.color) }
+        // 2. ユニフォームの色でチームを分ける（GK と審判は色が違うため代表色の計算から除く）
+        let colors = observations.flatMap { $0.filter { !$0.isGoalkeeper && !$0.isReferee }.compactMap(\.color) }
         let centroids = teamCentroids(colors: colors, ownAnchor: setup.ownColor)
-
-        // 3. 追跡し、追跡ごとに多数決でチームを決める
-        var tracks = track(observations: observations, frames: valid)
-        for index in tracks.indices {
-            for point in tracks[index].points {
-                let observation = observations[point.state][point.observation]
-                if observation.isGoalkeeper {
-                    tracks[index].goalkeeperCount += 1
-                } else if let color = observation.color {
-                    switch team(of: color, own: centroids.own, opponent: centroids.opponent) {
-                    case .own?: tracks[index].ownVotes += 1
-                    case .opponent?: tracks[index].opponentVotes += 1
-                    case nil: break
-                    }
-                }
-                if let number = observation.jerseyNumber {
-                    tracks[index].numberVotes[number, default: 0] += 1
-                }
-            }
+        let votes = observations.map { list in
+            list.map { teamVote(palette: $0.palette, own: centroids.own, opponent: centroids.opponent) }
         }
+
+        // 3. 追跡し、追跡ごとに重み付きの多数決でチームを決める
+        var tracks = track(observations: observations, votes: votes, frames: valid)
 
         // 途切れた追跡を、位置・チーム・背番号が矛盾しない範囲でつなぎ直す
         tracks = stitch(tracks)
@@ -150,7 +142,7 @@ nonisolated enum MatchAnalyzer {
         var assignments: [Int: [Int: DetectionAssignment]] = [:]
 
         for track in tracks {
-            let isGoalkeeper = track.goalkeeperCount * 2 > track.points.count
+            let isGoalkeeper = track.isGoalkeeper
             func add(_ position: CGPoint, at state: Int) {
                 guard let team = track.team else { return }
                 let player = TrackedPlayer(trackID: track.id, position: position, isGoalkeeper: isGoalkeeper)
@@ -324,15 +316,61 @@ nonisolated enum MatchAnalyzer {
         return ownDistance < opponentDistance ? .own : .opponent
     }
 
+    /// ユニフォームの色のパレットから、どちらのチームらしいかを求める
+    ///
+    /// 色ごとに近いチームへ「割合 x チームの色との近さ」を足し、差を票の強さ（0〜1）にする。
+    /// 肌やパンツのように、どちらかのチームに少し近いだけの色はほとんど数えない。
+    /// 白・灰・黒の画素は背景のフェンスやネット、ラインと区別できないため、相手が有彩色のチームなら
+    /// さらに重みを半分にする。これで、遠くの小さな選手に背景の灰色が混ざっても、有彩色の
+    /// ユニフォームを見落としにくくなる（判定できないときは票を入れない）。
+    static func teamVote(palette: [WeightedColor], own: LabColor, opponent: LabColor?) -> TeamVote? {
+        guard let dominant = palette.first?.color else { return nil }
+        guard let opponent else {
+            return team(of: dominant, own: own, opponent: nil).map { TeamVote(team: $0, strength: 1) }
+        }
+
+        var ownSupport = 0.0
+        var opponentSupport = 0.0
+        for entry in palette {
+            let ownDistance = entry.color.distance(to: own)
+            let opponentDistance = entry.color.distance(to: opponent)
+            let nearest = min(ownDistance, opponentDistance)
+            // どちらのチームの色からも遠い色（肌、パンツ、芝の影など）は数えない
+            guard nearest < paletteMatchRadius, abs(ownDistance - opponentDistance) >= 4 else { continue }
+            let isOwn = ownDistance < opponentDistance
+            let otherTeamColor = isOwn ? opponent : own
+            var weight = entry.weight * (1 - nearest / paletteMatchRadius)
+            if entry.color.chroma < achromaticChroma && otherTeamColor.chroma >= achromaticChroma {
+                weight *= 0.5
+            }
+            if isOwn {
+                ownSupport += weight
+            } else {
+                opponentSupport += weight
+            }
+        }
+
+        let strength = abs(ownSupport - opponentSupport)
+        guard max(ownSupport, opponentSupport) >= 0.1, strength >= 0.06 else { return nil }
+        return TeamVote(team: ownSupport > opponentSupport ? .own : .opponent, strength: min(1, strength))
+    }
+
+    /// これより彩度が低い色は、白・灰・黒とみなす
+    static let achromaticChroma = 12.0
+    /// チームの色とみなす色の差の上限
+    static let paletteMatchRadius = 40.0
+    /// 審判と判定された人を、チームの選手に戻す票の強さ
+    static let refereeOverrideStrength = 0.35
+
     private static func resolvedTeam(of track: Track, setup: AnalysisSetup) -> TeamSide? {
+        // 審判の判定が色の票を上回る追跡は審判のまま（チームに入れない）
+        if track.isReferee { return nil }
         // GK は色が違うため、守っているゴールの側で決める
-        if track.goalkeeperCount * 2 > track.points.count {
+        if track.isGoalkeeper {
             let meanX = track.points.map { Double($0.position.x) }.reduce(0, +) / Double(track.points.count)
             return setup.defendingTeam(atX: meanX)
         }
-        if track.ownVotes > track.opponentVotes { return .own }
-        if track.opponentVotes > track.ownVotes { return .opponent }
-        return nil
+        return track.colorTeam
     }
 
     // MARK: - Tracking
@@ -340,9 +378,28 @@ nonisolated enum MatchAnalyzer {
     nonisolated struct Observation {
         let detectionIndex: Int
         let position: CGPoint
-        let color: LabColor?
+        let palette: [WeightedColor]
+        /// 枠の高さ（画像の高さに対する割合）。小さく写るほど色が当てにならない
+        let boxHeight: Double
         let isGoalkeeper: Bool
+        let isReferee: Bool
         let jerseyNumber: Int?
+
+        var color: LabColor? {
+            palette.first?.color
+        }
+
+        /// 票の重み。画像の高さの 12% 未満に写る選手は、小さいほど軽くする
+        var voteWeight: Double {
+            min(1, max(0.3, boxHeight / 0.12))
+        }
+    }
+
+    /// 1回の観測から見たチーム
+    nonisolated struct TeamVote {
+        let team: TeamSide
+        /// 0〜1
+        let strength: Double
     }
 
     nonisolated struct TrackPoint {
@@ -359,8 +416,10 @@ nonisolated enum MatchAnalyzer {
         var points: [TrackPoint]
         var velocityX = 0.0
         var velocityY = 0.0
-        var ownVotes = 0
-        var opponentVotes = 0
+        var ownVotes = 0.0
+        var opponentVotes = 0.0
+        /// 審判と判定され、色でもチームと言い切れなかった観測の重み
+        var refereeVotes = 0.0
         var goalkeeperCount = 0
         var numberVotes: [Int: Int] = [:]
         var team: TeamSide?
@@ -368,11 +427,52 @@ nonisolated enum MatchAnalyzer {
         var first: TrackPoint { points[0] }
         var last: TrackPoint { points[points.count - 1] }
 
-        /// 色の多数決によるチーム（GK を除く）
+        /// 色の重み付き多数決によるチーム（GK を除く）
         var colorTeam: TeamSide? {
             if ownVotes > opponentVotes { return .own }
             if opponentVotes > ownVotes { return .opponent }
             return nil
+        }
+
+        /// 色の票の差がはっきりしているときのチーム（追跡の対応付けに使う）
+        var confidentColorTeam: TeamSide? {
+            guard abs(ownVotes - opponentVotes) >= 1 else { return nil }
+            return colorTeam
+        }
+
+        var isGoalkeeper: Bool {
+            goalkeeperCount * 2 > points.count
+        }
+
+        var isReferee: Bool {
+            refereeVotes > ownVotes + opponentVotes
+        }
+
+        /// 観測を1つ加え、チーム・GK・背番号の票を数える
+        mutating func add(_ point: TrackPoint, observation: Observation, vote: TeamVote?) {
+            points.append(point)
+            if observation.isGoalkeeper {
+                goalkeeperCount += 1
+            } else if observation.isReferee {
+                // 審判と判定されても、色がはっきり一方のチームなら選手として数える
+                if let vote, vote.strength >= MatchAnalyzer.refereeOverrideStrength {
+                    addVote(vote, weight: observation.voteWeight)
+                } else {
+                    refereeVotes += observation.voteWeight
+                }
+            } else if let vote {
+                addVote(vote, weight: observation.voteWeight)
+            }
+            if let number = observation.jerseyNumber {
+                numberVotes[number, default: 0] += 1
+            }
+        }
+
+        private mutating func addVote(_ vote: TeamVote, weight: Double) {
+            switch vote.team {
+            case .own: ownVotes += vote.strength * weight
+            case .opponent: opponentVotes += vote.strength * weight
+            }
         }
 
         /// 読み取りの過半数を占める背番号（2回以上読めたもの）
@@ -407,9 +507,8 @@ nonisolated enum MatchAnalyzer {
                 // チームと背番号が食い違うものはつながない
                 if let x = earlier.colorTeam, let y = later.colorTeam, x != y { continue }
                 if let x = earlier.jerseyNumber, let y = later.jerseyNumber, x != y { continue }
-                let earlierIsKeeper = earlier.goalkeeperCount * 2 > earlier.points.count
-                let laterIsKeeper = later.goalkeeperCount * 2 > later.points.count
-                if earlierIsKeeper != laterIsKeeper { continue }
+                if earlier.isGoalkeeper != later.isGoalkeeper { continue }
+                if earlier.isReferee != later.isReferee { continue }
                 links.append((a, b, d))
             }
         }
@@ -431,6 +530,7 @@ nonisolated enum MatchAnalyzer {
                 track.points += part.points
                 track.ownVotes += part.ownVotes
                 track.opponentVotes += part.opponentVotes
+                track.refereeVotes += part.refereeVotes
                 track.goalkeeperCount += part.goalkeeperCount
                 track.numberVotes.merge(part.numberVotes, uniquingKeysWith: +)
                 current = next[index]
@@ -441,7 +541,10 @@ nonisolated enum MatchAnalyzer {
     }
 
     /// 等速の予測と距離による貪欲な対応付けで、フレーム間の同一人物を結ぶ
-    static func track(observations: [[Observation]], frames: [ProcessedFrame]) -> [Track] {
+    ///
+    /// 交差や密集で追跡が相手チームの選手に乗り移らないよう、それまでの色の票とはっきり食い違う
+    /// 観測には距離の罰則を加える。
+    static func track(observations: [[Observation]], votes: [[TeamVote?]], frames: [ProcessedFrame]) -> [Track] {
         var tracks: [Track] = []
         var active: [Int] = []
 
@@ -459,11 +562,15 @@ nonisolated enum MatchAnalyzer {
                 )
                 // 選手の最高速度（約 7 m/s）と座標の誤差を見込んだ範囲
                 let gate = 1.5 + 7 * dt
+                let trackTeam = track.confidentColorTeam
                 for (observationIndex, observation) in list.enumerated() {
-                    let d = distance(predicted, observation.position)
-                    if d <= gate {
-                        pairs.append((trackIndex, observationIndex, d))
+                    var d = distance(predicted, observation.position)
+                    guard d <= gate else { continue }
+                    if let trackTeam, let vote = votes[state][observationIndex],
+                       vote.strength >= colorConflictStrength, vote.team != trackTeam {
+                        d += colorConflictPenalty
                     }
+                    pairs.append((trackIndex, observationIndex, d))
                 }
             }
             pairs.sort { $0.distance < $1.distance }
@@ -485,14 +592,21 @@ nonisolated enum MatchAnalyzer {
                     tracks[pair.track].velocityX = isFirstStep ? vx : (tracks[pair.track].velocityX + vx) / 2
                     tracks[pair.track].velocityY = isFirstStep ? vy : (tracks[pair.track].velocityY + vy) / 2
                 }
-                tracks[pair.track].points.append(TrackPoint(state: state, observation: pair.observation, time: time, position: position))
+                tracks[pair.track].add(
+                    TrackPoint(state: state, observation: pair.observation, time: time, position: position),
+                    observation: list[pair.observation],
+                    vote: votes[state][pair.observation]
+                )
             }
 
             for (observationIndex, observation) in list.enumerated() where !usedObservations.contains(observationIndex) {
-                tracks.append(Track(
-                    id: tracks.count,
-                    points: [TrackPoint(state: state, observation: observationIndex, time: time, position: observation.position)]
-                ))
+                var track = Track(id: tracks.count, points: [])
+                track.add(
+                    TrackPoint(state: state, observation: observationIndex, time: time, position: observation.position),
+                    observation: observation,
+                    vote: votes[state][observationIndex]
+                )
+                tracks.append(track)
                 active.append(tracks.count - 1)
             }
         }

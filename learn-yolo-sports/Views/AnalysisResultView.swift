@@ -84,6 +84,10 @@ struct DetectionBrowserView: View {
     @State private var selectedTrack: SelectedTrack?
     @State private var showingGoalOptions = false
     @State private var message: String?
+    /// 追いかけて評価している追跡 ID
+    @State private var followedTrackID: Int?
+    /// タップした人（追跡の評価・背番号の割り当てを選ぶ）
+    @State private var tappedDetection: SavedDetection?
 
     var body: some View {
         // 画像が保存されているフレームだけをたどる
@@ -92,8 +96,13 @@ struct DetectionBrowserView: View {
             if frames.indices.contains(selectedFrameIndex) {
                 let frame = frames[selectedFrameIndex]
 
-                SavedFrameView(record: record, frame: frame)
-                    .frame(height: 260)
+                SavedFrameView(
+                    record: record,
+                    frame: frame,
+                    focusedTrackID: followedTrackID,
+                    onTapDetection: { tappedDetection = $0 }
+                )
+                .frame(height: 260)
 
                 VStack(spacing: 5) {
                     Text("フレーム \(selectedFrameIndex + 1) / \(frames.count)（\(CoachReport.time(frame.timestamp))）")
@@ -132,7 +141,19 @@ struct DetectionBrowserView: View {
                 Divider()
 
                 ScrollView {
-                    if frame.detections.isEmpty {
+                    if let followedTrackID {
+                        TrackReviewPanel(
+                            record: record,
+                            trackID: followedTrackID,
+                            frame: frame,
+                            onJump: { frameNumber in
+                                if let index = frames.firstIndex(where: { $0.frameNumber == frameNumber }) {
+                                    selectedFrameIndex = index
+                                }
+                            },
+                            onClose: { self.followedTrackID = nil }
+                        )
+                    } else if frame.detections.isEmpty {
                         ContentUnavailableView(
                             "検出なし",
                             systemImage: "magnifyingglass",
@@ -142,22 +163,43 @@ struct DetectionBrowserView: View {
                         DetectionListView(
                             detections: frame.detections,
                             trackNumbers: record.effectiveTrackNumbers,
-                            onSelectPlayer: { detection in
-                                if let trackID = detection.trackID {
-                                    selectedTrack = SelectedTrack(id: trackID)
-                                }
-                            }
+                            onSelectPlayer: { tappedDetection = $0 }
                         )
                     }
                 }
 
-                statistics
+                if followedTrackID == nil {
+                    statistics
+                }
             } else {
                 ContentUnavailableView("フレームがありません", systemImage: "photo.stack")
             }
         }
         .sheet(item: $selectedTrack) { track in
             NumberAssignmentSheet(record: record, trackID: track.id)
+        }
+        .confirmationDialog(
+            tappedDetection?.label(trackNumbers: record.effectiveTrackNumbers) ?? "",
+            isPresented: Binding(
+                get: { tappedDetection != nil },
+                set: { if !$0 { tappedDetection = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: tappedDetection
+        ) { detection in
+            if let trackID = detection.trackID {
+                Button(followedTrackID == trackID ? "評価を終える" : "この人を追跡して評価") {
+                    followedTrackID = followedTrackID == trackID ? nil : trackID
+                }
+                if detection.team == .own {
+                    Button("背番号を割り当て") {
+                        selectedTrack = SelectedTrack(id: trackID)
+                    }
+                }
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: { _ in
+            Text("追跡を評価すると、この人の枠だけを強調して前後のフレームをたどれます。")
         }
     }
 
@@ -251,6 +293,16 @@ struct DetectionBrowserView: View {
                     value: String(format: "%.1fs", record.processingDuration),
                     icon: "clock"
                 )
+
+                // 追跡を評価していれば、その正解率も出す
+                let evaluation = record.overallEvaluation
+                if evaluation.reviewedCount > 0 {
+                    StatView(
+                        title: "追跡の正解率",
+                        value: TrackEvaluation.percent(evaluation.trackingAccuracy),
+                        icon: "scope"
+                    )
+                }
             }
             .padding()
         }

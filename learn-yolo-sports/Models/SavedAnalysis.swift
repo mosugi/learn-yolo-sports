@@ -94,6 +94,8 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     var trackNumbers: [Int: Int]? = nil
     /// ユーザーが割り当てた背番号（追跡 ID → 背番号。0 は割り当ての解除）
     var numberOverrides: [Int: Int]? = nil
+    /// ユーザーが目で確かめた追跡の評価（追跡 ID → フレーム番号 → 評価）
+    var trackReviews: [Int: [Int: TrackReviewMark]]? = nil
     
     /// 追跡 ID ごとの背番号（ユーザーの割り当てを優先）
     var effectiveTrackNumbers: [Int: Int] {
@@ -168,8 +170,10 @@ extension SavedFrame {
             imageFileName: frame.imageFileName,
             detections: frame.detections.enumerated().map { index, detection in
                 let assignment = assignments?[index]
+                // 審判と判定されたが、色と追跡からチームが決まった人は選手として扱う
+                let isReassignedReferee = detection.sportsClass == .referee && assignment?.team != nil
                 return SavedDetection(
-                    label: detection.label,
+                    label: isReassignedReferee ? SportsClass.player.rawValue : detection.label,
                     confidence: detection.confidence,
                     boundingBox: detection.boundingBox,
                     pitchPosition: detection.pitchPosition,

@@ -176,6 +176,11 @@ nonisolated struct LabColor: Codable, Hashable {
         )
     }
 
+    /// 彩度（a*b* 平面での原点からの距離）。白・灰・黒は小さい
+    var chroma: Double {
+        (a * a + b * b).squareRoot()
+    }
+
     /// 2色の内分
     func blended(with other: LabColor, ratio: Double) -> LabColor {
         LabColor(
@@ -183,6 +188,46 @@ nonisolated struct LabColor: Codable, Hashable {
             a: a + (other.a - a) * ratio,
             b: b + (other.b - b) * ratio
         )
+    }
+}
+
+/// 領域内の代表色と、その色が占める割合
+nonisolated struct WeightedColor {
+    let color: LabColor
+    /// 0〜1
+    let weight: Double
+
+    /// 色を最大 k 個にまとめる（k-means）。割合の大きい順に返す
+    static func palette(of colors: [LabColor], k: Int = 3) -> [WeightedColor] {
+        guard let mean = LabColor.mean(colors) else { return [] }
+        // 初期値: 平均と、それまでの中心から最も遠い色
+        var centers = [mean]
+        while centers.count < k {
+            guard let farthest = colors.max(by: { a, b in
+                centers.map(a.distance(to:)).min()! < centers.map(b.distance(to:)).min()!
+            }), centers.map(farthest.distance(to:)).min()! > 8 else { break }
+            centers.append(farthest)
+        }
+
+        var members = [[LabColor]](repeating: [], count: centers.count)
+        for _ in 0..<8 {
+            members = [[LabColor]](repeating: [], count: centers.count)
+            for color in colors {
+                let nearest = centers.indices.min { color.distance(to: centers[$0]) < color.distance(to: centers[$1]) }!
+                members[nearest].append(color)
+            }
+            for index in centers.indices {
+                if let center = LabColor.mean(members[index]) {
+                    centers[index] = center
+                }
+            }
+        }
+
+        let total = Double(colors.count)
+        return centers.indices
+            .filter { !members[$0].isEmpty }
+            .map { WeightedColor(color: centers[$0], weight: Double(members[$0].count) / total) }
+            .sorted { $0.weight > $1.weight }
     }
 }
 
@@ -223,6 +268,11 @@ nonisolated struct PixelImage {
 
     /// 正規化座標の矩形内にある、芝以外の画素の平均色
     func meanColor(in rect: CGRect, samplesPerSide: Int = 10) -> LabColor? {
+        colors(in: rect, samplesPerSide: samplesPerSide).flatMap(LabColor.mean)
+    }
+
+    /// 正規化座標の矩形内にある、芝以外の画素の色（芝が多すぎる場合は nil）
+    private func colors(in rect: CGRect, samplesPerSide: Int) -> [LabColor]? {
         var colors: [LabColor] = []
         for i in 0..<samplesPerSide {
             for j in 0..<samplesPerSide {
@@ -239,17 +289,22 @@ nonisolated struct PixelImage {
             }
         }
         guard colors.count >= max(3, samplesPerSide * samplesPerSide / 5) else { return nil }
-        return LabColor.mean(colors)
+        return colors
     }
 
-    /// 選手のバウンディングボックス（正規化座標）からユニフォームの胴体部分の色を求める
-    func jerseyColor(of box: CGRect) -> LabColor? {
+    /// 選手のバウンディングボックス（正規化座標）から、ユニフォームの胴体部分の色を最大3色にまとめて求める
+    ///
+    /// 平均色にすると、遠くの小さな選手では背景（フェンス・ネット・ライン）や肌の色が混ざって
+    /// 別のチームの色に寄ってしまうため、色ごとの割合で残す。
+    func jerseyPalette(of box: CGRect) -> [WeightedColor]? {
         let torso = CGRect(
             x: box.minX + box.width * 0.25,
             y: box.minY + box.height * 0.15,
             width: box.width * 0.5,
             height: box.height * 0.35
         )
-        return meanColor(in: torso, samplesPerSide: 8)
+        guard let colors = colors(in: torso, samplesPerSide: 10) else { return nil }
+        let palette = WeightedColor.palette(of: colors)
+        return palette.isEmpty ? nil : palette
     }
 }

@@ -28,13 +28,18 @@ nonisolated struct ProcessedDetection {
     let pitchPosition: CGPoint?
     /// 対象コート内か（コート設定がない場合は nil）
     let inCourt: Bool?
-    /// ユニフォームの色（選手・GK のみ）
-    let jerseyColor: LabColor?
+    /// ユニフォームの胴体部分の色（選手・GK・審判のみ。割合の大きい順に最大3色）
+    var jerseyPalette: [WeightedColor]? = nil
     /// 読み取れた背番号（自チームらしい選手のみ）
     var jerseyNumber: Int? = nil
 
     var sportsClass: SportsClass? {
         SportsClass(rawValue: label)
+    }
+
+    /// ユニフォームの主な色（最も多くを占める色）
+    var jerseyColor: LabColor? {
+        jerseyPalette?.first?.color
     }
 }
 
@@ -126,8 +131,7 @@ actor KeyframeProcessor {
                     confidence: detection.confidence,
                     boundingBox: normalized,
                     pitchPosition: nil,
-                    inCourt: nil,
-                    jerseyColor: nil
+                    inCourt: nil
                 )
             }
 
@@ -140,15 +144,15 @@ actor KeyframeProcessor {
                 inCourt = geometry.hasPlausibleHeight(normalized, imageSize: imageSize)
             }
 
+            // 審判と判定された人も、ユニフォームの色がチームと一致すれば選手に戻すため色を取る
             let needsColor = inCourt && detection.label != SportsClass.ball.rawValue
-                && detection.label != SportsClass.referee.rawValue
             return ProcessedDetection(
                 label: detection.label,
                 confidence: detection.confidence,
                 boundingBox: normalized,
                 pitchPosition: position,
                 inCourt: inCourt,
-                jerseyColor: needsColor ? pixels?.jerseyColor(of: normalized) : nil
+                jerseyPalette: needsColor ? pixels?.jerseyPalette(of: normalized) : nil
             )
         }
 

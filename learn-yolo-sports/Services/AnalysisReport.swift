@@ -53,6 +53,17 @@ nonisolated enum AnalysisReport {
         }
         lines.append("")
         
+        let evaluation = record.overallEvaluation
+        if evaluation.reviewedCount > 0 {
+            lines.append("## 追跡の精度（ユーザーが目視で評価）")
+            lines.append("- 評価した選手: \(record.reviewedTrackIDs.count) 人、\(evaluation.reviewedCount) フレーム")
+            lines.append("- 同じ選手を追えていた割合: \(TrackEvaluation.percent(evaluation.trackingAccuracy))")
+            lines.append("- チーム判定が正しかった割合: \(TrackEvaluation.percent(evaluation.teamAccuracy))")
+            lines.append("- 別の人への乗り移り: \(evaluation.switched) フレーム、見失い: \(evaluation.lost) フレーム")
+            lines.append("- 追跡やチームの判定に基づく数値は、この精度を踏まえて解釈すること")
+            lines.append("")
+        }
+        
         if let report = record.coachReport {
             lines.append("## コーチ解説（規則に基づく判定）")
             lines.append(report.promptText)

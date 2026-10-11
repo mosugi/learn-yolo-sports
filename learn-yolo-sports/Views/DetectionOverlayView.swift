@@ -19,6 +19,10 @@ struct AnnotatedFrameView: View {
     var showsLabels = true
     /// 追跡 ID ごとの背番号
     var trackNumbers: [Int: Int] = [:]
+    /// 強調表示する追跡 ID（他の枠は薄く表示する）
+    var focusedTrackID: Int? = nil
+    /// 枠をタップしたとき
+    var onTapDetection: ((SavedDetection) -> Void)? = nil
 
     var body: some View {
         GeometryReader { geometry in
@@ -43,18 +47,32 @@ struct AnnotatedFrameView: View {
                 ForEach(Array(detections.enumerated()), id: \.offset) { _, detection in
                     let box = rect(detection.boundingBox, in: fit)
                     let color = detection.displayColor
+                    let isFocused = focusedTrackID != nil && detection.trackID == focusedTrackID
+                    let isDimmed = focusedTrackID != nil && !isFocused
+
+                    if isFocused {
+                        // 追跡中の選手は白い縁取りで目立たせる
+                        Rectangle()
+                            .strokeBorder(Color.white, lineWidth: 5)
+                            .frame(width: max(box.width, 2) + 6, height: max(box.height, 2) + 6)
+                            .position(x: box.midX, y: box.midY)
+                    }
 
                     Rectangle()
                         .strokeBorder(
                             color,
-                            style: StrokeStyle(lineWidth: detection.isExcluded ? 1 : 2, dash: detection.isExcluded ? [3, 3] : [])
+                            style: StrokeStyle(
+                                lineWidth: isFocused ? 3 : (detection.isExcluded ? 1 : 2),
+                                dash: detection.isExcluded ? [3, 3] : []
+                            )
                         )
                         .frame(width: max(box.width, 2), height: max(box.height, 2))
                         .position(x: box.midX, y: box.midY)
+                        .opacity(isDimmed ? 0.3 : 1)
 
-                    if showsLabels && !detection.isExcluded {
+                    if showsLabels && !detection.isExcluded && !isDimmed {
                         Text(label(for: detection))
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: isFocused ? 11 : 9, weight: .bold))
                             .padding(.horizontal, 3)
                             .background(color)
                             .foregroundStyle(.black)
@@ -63,9 +81,35 @@ struct AnnotatedFrameView: View {
                             .position(x: box.midX, y: max(6, box.minY - 7))
                     }
                 }
+
+                if let onTapDetection {
+                    // 小さな枠もタップしやすいよう、最も近い枠を選ぶ
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { location in
+                            if let detection = nearestDetection(to: location, in: fit) {
+                                onTapDetection(detection)
+                            }
+                        }
+                }
             }
         }
         .clipped()
+    }
+
+    /// タップした位置に最も近い、追跡 ID のある枠（離れすぎている場合は nil）
+    private func nearestDetection(to location: CGPoint, in fit: CGRect) -> SavedDetection? {
+        detections
+            .filter { $0.trackID != nil && !$0.isExcluded }
+            .map { detection -> (SavedDetection, CGFloat) in
+                let box = rect(detection.boundingBox, in: fit)
+                let dx = max(box.minX - location.x, 0, location.x - box.maxX)
+                let dy = max(box.minY - location.y, 0, location.y - box.maxY)
+                return (detection, hypot(dx, dy))
+            }
+            .filter { $0.1 <= 24 }
+            .min { $0.1 < $1.1 }
+            .map { $0.0 }
     }
 
     private func label(for detection: SavedDetection) -> String {
@@ -92,6 +136,8 @@ struct SavedFrameView: View {
     let record: SavedAnalysis
     let frame: SavedFrame
     var showsLabels = true
+    var focusedTrackID: Int? = nil
+    var onTapDetection: ((SavedDetection) -> Void)? = nil
 
     @State private var image: CGImage?
     @State private var didLoad = false
@@ -105,7 +151,9 @@ struct SavedFrameView: View {
                     detections: frame.detections,
                     courtLines: record.setup.flatMap { CourtGeometry(setup: $0) }?.imageLineSegments() ?? [],
                     showsLabels: showsLabels,
-                    trackNumbers: record.effectiveTrackNumbers
+                    trackNumbers: record.effectiveTrackNumbers,
+                    focusedTrackID: focusedTrackID,
+                    onTapDetection: onTapDetection
                 )
             } else if didLoad {
                 ContentUnavailableView("画像なし", systemImage: "photo")
@@ -127,7 +175,7 @@ struct SavedFrameView: View {
 struct DetectionListView: View {
     let detections: [SavedDetection]
     var trackNumbers: [Int: Int] = [:]
-    /// 自チームの選手をタップしたとき（背番号の割り当てに使う）
+    /// 追跡 ID のある人をタップしたとき（追跡の評価と背番号の割り当てに使う）
     var onSelectPlayer: ((SavedDetection) -> Void)? = nil
 
     var body: some View {
@@ -136,7 +184,7 @@ struct DetectionListView: View {
                 row(detection)
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        if detection.team == .own, detection.trackID != nil {
+                        if detection.trackID != nil, !detection.isExcluded {
                             onSelectPlayer?(detection)
                         }
                     }
@@ -165,8 +213,8 @@ struct DetectionListView: View {
 
             Spacer()
 
-            if detection.team == .own, detection.trackID != nil, onSelectPlayer != nil {
-                Image(systemName: "number")
+            if detection.trackID != nil, !detection.isExcluded, onSelectPlayer != nil {
+                Image(systemName: "scope")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
