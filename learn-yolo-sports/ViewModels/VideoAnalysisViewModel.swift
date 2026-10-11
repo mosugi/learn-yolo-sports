@@ -26,6 +26,17 @@ enum AnalysisPhase {
     }
 }
 
+/// 解析中に表示するフレーム（いまどこを処理しているかを見せる）
+struct AnalysisLivePreview {
+    let image: CGImage
+    let detections: [SavedDetection]
+    let timestamp: Double
+    var teams: [TeamInfo]? = nil
+    var players: [PlayerIdentity]? = nil
+    /// 処理中のシーン（シーン解説の段階のみ）
+    var segment: SceneSegment? = nil
+}
+
 /// 動画解析のビューモデル
 ///
 /// App で1つだけ生成して Environment で共有する。解析は View のライフサイクルから切り離した
@@ -39,6 +50,8 @@ final class VideoAnalysisViewModel {
     private static let framesPerSecond = 3
     /// 1度に並行して処理するフレーム数
     private static let batchSize = 4
+    /// 解析中に表示するフレームの長辺
+    private nonisolated static let previewDimension = 640
 
     // MARK: - State
 
@@ -52,6 +65,9 @@ final class VideoAnalysisViewModel {
     var currentScene: Int = 0
     var totalScenes: Int = 0
     var errorMessage: String?
+
+    /// 解析中に表示するフレーム
+    var livePreview: AnalysisLivePreview?
 
     /// 直近の解析結果の保存 ID（AnalysisStore から参照する）
     var currentRecordID: UUID?
@@ -165,6 +181,7 @@ final class VideoAnalysisViewModel {
         errorMessage = nil
         currentRecordID = nil
         hasUnseenResult = false
+        livePreview = nil
     }
 
     /// アプリがフォアグラウンドに戻ったときに呼ぶ。バックグラウンドで生成できなかったAI解説を再試行する
@@ -224,6 +241,7 @@ final class VideoAnalysisViewModel {
         let videoURL = store.videoURL(for: initialCheckpoint)
         activeVideoURL = videoURL
         processingCheckpointID = id
+        livePreview = nil
         let startTime = Date()
 
         let session = ContinuedProcessingSession { [weak self] in
@@ -268,6 +286,10 @@ final class VideoAnalysisViewModel {
             var players = checkpoint.players
             var segments = checkpoint.segments
             let aspectRatio = Self.aspectRatio(width: checkpoint.imageWidth ?? 0, height: checkpoint.imageHeight ?? 0)
+
+            if livePreview == nil {
+                await showStoredFrame(of: checkpoint, at: checkpoint.videoDuration, frames: frames)
+            }
 
             if segments == nil {
                 phase = .segmenting
@@ -334,6 +356,14 @@ final class VideoAnalysisViewModel {
             for index in resolvedSegments.indices {
                 try Task.checkCancellation()
                 currentScene = index + 1
+                await showStoredFrame(
+                    of: checkpoint,
+                    at: resolvedSegments[index].keyTime,
+                    frames: frames,
+                    teams: teams,
+                    players: players,
+                    segment: resolvedSegments[index]
+                )
                 session.update(
                     fraction: 0.85 + 0.15 * Double(index + 1) / Double(max(1, resolvedSegments.count)),
                     subtitle: "シーン解説 \(index + 1)/\(resolvedSegments.count)"
@@ -399,6 +429,7 @@ final class VideoAnalysisViewModel {
 
         isAnalyzing = false
         phase = .idle
+        livePreview = nil
         detectionStart = nil
         analysisTask = nil
         backgroundSession = nil
@@ -491,6 +522,14 @@ final class VideoAnalysisViewModel {
                 }
             }
 
+            if let last = batchResults.last {
+                livePreview = AnalysisLivePreview(
+                    image: last.preview,
+                    detections: last.frame.detections,
+                    timestamp: last.frame.timestamp
+                )
+            }
+
             index = batchEnd
             currentFrame = index
             analysisProgress = Double(index) / Double(totalFrames) * 0.85
@@ -513,6 +552,8 @@ final class VideoAnalysisViewModel {
         let image: CGImage?
         /// カメラの動きを求めるための縮小画像
         let thumbnail: CGImage
+        /// 解析中の画面に表示する縮小画像
+        let preview: CGImage
         let imageSize: CGSize
     }
 
@@ -543,7 +584,30 @@ final class VideoAnalysisViewModel {
             frame: frame,
             image: isKeyFrame ? image : nil,
             thumbnail: FrameImageIO.downscaled(image, maxDimension: PlayerAttributeAnalyzer.thumbnailDimension) ?? image,
+            preview: FrameImageIO.downscaled(image, maxDimension: previewDimension) ?? image,
             imageSize: CGSize(width: image.width, height: image.height)
+        )
+    }
+
+    /// 保存済みのキーフレーム（1秒ごと）のうち、指定時刻に最も近いものを解析中の画面に表示する
+    private func showStoredFrame(
+        of checkpoint: AnalysisCheckpoint,
+        at time: Double,
+        frames: [SavedFrame],
+        teams: [TeamInfo]? = nil,
+        players: [PlayerIdentity]? = nil,
+        segment: SceneSegment? = nil
+    ) async {
+        let keyFrames = frames.filter { $0.imageFileName != nil }
+        guard let frame = keyFrames.min(by: { abs($0.timestamp - time) < abs($1.timestamp - time) }),
+              let image = await store.loadFrameImage(for: checkpoint, frameNumber: frame.frameNumber) else { return }
+        livePreview = AnalysisLivePreview(
+            image: image,
+            detections: frame.detections,
+            timestamp: frame.timestamp,
+            teams: teams,
+            players: players,
+            segment: segment
         )
     }
 
