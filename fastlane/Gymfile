@@ -1,0 +1,7 @@
+scheme("learn-yolo-sports")
+project("learn-yolo-sports.xcodeproj")
+configuration("Release")
+destination("generic/platform=iOS")
+export_method("app-store")
+output_directory("./build")
+clean(true)

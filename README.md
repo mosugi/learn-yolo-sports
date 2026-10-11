@@ -35,6 +35,9 @@
 ### 5. バックグラウンド解析と進捗表示
 - 解析中も他のタブを操作可能。アプリをバックグラウンドに移しても `BGContinuedProcessingTask` で解析を継続
 - タブバー上のアクセサリと解析タブのバッジで進捗を表示（どのタブからでもキャンセル可能）
+- 動画の読み込み（iCloud からのダウンロードを含む）中は進捗バー・経過時間・残り時間を表示し、キャンセル可能
+- 解析前に動画の長さ・解像度・解析フレーム数と所要時間の目安を表示（前回の解析で計測した処理速度から算出）
+- 解析中は経過時間と残り時間を表示。進捗バーの配分も実測の処理時間に合わせて調整
 
 ### 6. 解析結果の保存と共有
 - 解析完了時に自動保存し、「履歴」タブから見返し・削除が可能
@@ -100,6 +103,7 @@ learn-yolo-sports/
 │   └── MatchChapter.swift             # 得点チャプター、選手別レポート
 ├── Services/
 │   ├── VideoFrameExtractor.swift      # フレームの逐次抽出
+│   ├── VideoImporter.swift            # 動画の取り込みと進捗
 │   ├── YOLODetector.swift             # YOLO検出エンジン
 │   ├── KeyframeProcessor.swift        # 検出・コート判定・色の取得・画像保存
 │   ├── MatchAnalyzer.swift            # チーム分類・追跡・ボール保持・局面
@@ -132,10 +136,21 @@ learn-yolo-sports/
     └── FootballPlayerDetector.mlpackage  # setup_model.sh で生成（git 管理外）
 scripts/
 └── setup_model.sh                     # モデルのダウンロードと Core ML 変換
+learn-yolo-sportsUITests/
+└── ScreenshotTests.swift              # App Store 用スクリーンショット撮影
+fastlane/                              # TestFlight 配信・申請情報（docs/STORE_RELEASE.md）
+.github/workflows/
+├── ci.yml                             # PR ごとのビルド確認
+└── release.yml                        # fastlane（TestFlight 配信・申請情報の入力）
 docs/
 ├── YOLO_SETUP_GUIDE.md                # YOLOモデルのセットアップ詳細
-└── BUILD_CHECKLIST.md                 # ビルド・稼働確認チェックリスト
+├── BUILD_CHECKLIST.md                 # ビルド・稼働確認チェックリスト
+└── STORE_RELEASE.md                   # App Store 配信（fastlane × GitHub Actions）
 ```
+
+## 📦 App Store 配信
+
+fastlane と GitHub Actions で、TestFlight 配信・申請情報の入力・スクリーンショット撮影を自動化しています。`main` への push で TestFlight に配信されます。初回セットアップと各レーンの説明は [docs/STORE_RELEASE.md](docs/STORE_RELEASE.md) を参照してください。
 
 ## 🚀 使い方
 

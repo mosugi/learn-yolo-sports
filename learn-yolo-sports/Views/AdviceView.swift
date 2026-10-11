@@ -25,14 +25,17 @@ struct AdviceView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if let reason = advisor.unavailableReason {
-                        ContentUnavailableView(
-                            "アドバイスを生成できません",
-                            systemImage: "apple.intelligence",
-                            description: Text(reason)
-                        )
-                    } else if let record {
-                        content(for: record)
+                    if let record {
+                        // 生成済みのアドバイスは Apple Intelligence を使えない端末でも表示する
+                        if let reason = advisor.unavailableReason, record.advice == nil {
+                            ContentUnavailableView(
+                                "アドバイスを生成できません",
+                                systemImage: "apple.intelligence",
+                                description: Text(reason)
+                            )
+                        } else {
+                            content(for: record)
+                        }
                     }
                 }
                 .padding()
@@ -96,7 +99,11 @@ struct AdviceView: View {
                 .foregroundStyle(.red)
         }
         
-        if !advisor.isGenerating {
+        if let reason = advisor.unavailableReason {
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if !advisor.isGenerating {
             Button {
                 generate(for: record)
             } label: {

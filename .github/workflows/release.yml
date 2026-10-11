@@ -1,0 +1,103 @@
+name: fastlane
+
+on:
+  # 手動実行時は実行するレーンを選べる（push 時は beta）
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "実行する fastlane レーン"
+        type: choice
+        options:
+          - beta
+          - upload_metadata
+          - screenshots
+          - capture
+          - release
+        default: beta
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# 同時に複数の配信を走らせない（ビルド番号の衝突を防ぐ）
+concurrency:
+  group: fastlane
+  cancel-in-progress: false
+
+jobs:
+  fastlane:
+    # Xcode 27 が入ったイメージ（公開リポジトリなので macOS ランナーも無料）
+    runs-on: xcode-27
+    env:
+      LANE: ${{ inputs.lane || 'beta' }}
+    steps:
+      - name: Check App Store Connect API key
+        id: secrets
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          if [ -n "$ASC_KEY_ID" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$LANE" = "capture" ]; then
+            # スクリーンショット撮影だけなら API キーは不要
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::App Store Connect API キーの Secrets が未登録のため、fastlane をスキップしました（docs/STORE_RELEASE.md を参照）"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.secrets.outputs.run == 'true'
+        with:
+          # TestFlight の「テスト内容」を直近のコミットメッセージから作るため
+          fetch-depth: 20
+
+      - uses: ruby/setup-ruby@v1
+        if: steps.secrets.outputs.run == 'true'
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - name: Select Xcode
+        if: steps.secrets.outputs.run == 'true'
+        run: sudo xcode-select -s /Applications/Xcode_27.app
+
+      # ビルドを含むレーンでは YOLO モデルを用意する（未配置だとモックモードのアプリになる）
+      - name: Restore YOLO model
+        id: model-cache
+        if: steps.secrets.outputs.run == 'true' && (env.LANE == 'beta' || env.LANE == 'release')
+        uses: actions/cache@v4
+        with:
+          path: learn-yolo-sports/MLModels/FootballPlayerDetector.mlpackage
+          key: yolo-model-${{ hashFiles('scripts/setup_model.sh') }}
+
+      - uses: astral-sh/setup-uv@v6
+        if: steps.secrets.outputs.run == 'true' && (env.LANE == 'beta' || env.LANE == 'release') && steps.model-cache.outputs.cache-hit != 'true'
+
+      - name: Build YOLO model
+        if: steps.secrets.outputs.run == 'true' && (env.LANE == 'beta' || env.LANE == 'release') && steps.model-cache.outputs.cache-hit != 'true'
+        run: ./scripts/setup_model.sh
+
+      - name: Decode App Store Connect API key
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: echo "$ASC_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/asc_api_key.p8"
+
+      - name: Run fastlane ${{ env.LANE }} lane
+        if: steps.secrets.outputs.run == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_FILEPATH: ${{ runner.temp }}/asc_api_key.p8
+        run: bundle exec fastlane "$LANE"
+
+      - name: Upload screenshots
+        if: always() && steps.secrets.outputs.run == 'true' && (env.LANE == 'screenshots' || env.LANE == 'capture')
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: fastlane/screenshots
+          if-no-files-found: ignore

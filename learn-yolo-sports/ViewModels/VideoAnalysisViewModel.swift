@@ -34,6 +34,25 @@ struct AnalysisSettings: Equatable {
     var duration = 60.0
 }
 
+/// 直近の解析で計測した 1 フレームあたりの処理時間（次回の所要時間の見積もりに使う）
+///
+/// 実モデルとモックモードでは検出速度が大きく異なるため、別々に保存する。
+nonisolated enum ProcessingRate {
+    private static func key(usesRealModel: Bool) -> String {
+        usesRealModel ? "processingRate.real" : "processingRate.mock"
+    }
+
+    /// 1 フレームあたりの処理時間（秒）。未計測なら nil
+    static func load(usesRealModel: Bool) -> Double? {
+        let value = UserDefaults.standard.double(forKey: key(usesRealModel: usesRealModel))
+        return value > 0 ? value : nil
+    }
+
+    static func save(_ secondsPerFrame: Double, usesRealModel: Bool) {
+        UserDefaults.standard.set(secondsPerFrame, forKey: key(usesRealModel: usesRealModel))
+    }
+}
+
 /// 動画解析のビューモデル
 ///
 /// App で1つだけ生成して Environment で共有する。解析は View のライフサイクルから切り離した
@@ -69,15 +88,42 @@ class VideoAnalysisViewModel {
     /// 実モデルで動作しているか（nil: 未確認, false: モックモード）
     var isUsingRealModel: Bool?
 
+    /// 解析の開始時刻
+    private(set) var analysisStartDate: Date?
+
+    /// 解析完了の見込み時刻（見積もれない間は nil）
+    private(set) var estimatedCompletionDate: Date?
+
     // MARK: - Computed Properties
 
     var hasResults: Bool {
         currentRecordID != nil
     }
 
-    /// 進捗の短い説明（例: 物体検出 12/30）
+    /// 進捗の短い説明（例: 物体検出 12/30・残り約45秒）
     var progressDescription: String {
-        phase == .analyzing ? phase.label : "\(phase.label) \(currentFrame)/\(totalFrames)"
+        guard phase == .detecting else { return phase.label }
+        let base = "\(phase.label) \(currentFrame)/\(totalFrames)"
+        guard let remaining = estimatedRemaining(now: Date()) else { return base }
+        return base + "・残り" + DurationText.approximate(remaining)
+    }
+
+    /// 現在の設定で処理するフレーム数
+    var expectedFrameCount: Int {
+        let duration = min(settings.duration, max(0, (videoDuration ?? settings.startTime + settings.duration) - settings.startTime))
+        return max(1, Int((duration * Double(settings.framesPerSecond)).rounded(.up)))
+    }
+
+    /// 残り時間（見積もれない間は nil）
+    func estimatedRemaining(now: Date) -> TimeInterval? {
+        estimatedCompletionDate.map { max(0, $0.timeIntervalSince(now)) }
+    }
+
+    /// 解析を始める前の所要時間の目安（前回の計測値がない場合は nil）
+    var estimatedDuration: TimeInterval? {
+        guard let isUsingRealModel,
+              let rate = ProcessingRate.load(usesRealModel: isUsingRealModel) else { return nil }
+        return rate * Double(expectedFrameCount)
     }
 
     // MARK: - Dependencies
@@ -88,6 +134,8 @@ class VideoAnalysisViewModel {
 
     private var analysisTask: Task<Void, Never>?
     private var backgroundSession: ContinuedProcessingSession?
+    /// 前回の解析で計測した 1 フレームあたりの処理時間
+    private var previousRate: Double?
 
     init(store: AnalysisStore) {
         self.store = store
@@ -159,7 +207,11 @@ class VideoAnalysisViewModel {
         currentRecordID = nil
 
         let duration = min(settings.duration, max(0, (videoDuration ?? settings.startTime + settings.duration) - settings.startTime))
-        totalFrames = max(1, Int((duration * Double(settings.framesPerSecond)).rounded(.up)))
+        totalFrames = expectedFrameCount
+        let usesRealModel = isUsingRealModel ?? false
+        previousRate = ProcessingRate.load(usesRealModel: usesRealModel)
+        analysisStartDate = Date()
+        estimatedCompletionDate = previousRate.map { Date().addingTimeInterval($0 * Double(totalFrames)) }
 
         let recordID = UUID()
         let processor = KeyframeProcessor(
@@ -199,10 +251,16 @@ class VideoAnalysisViewModel {
             guard !frames.isEmpty else {
                 throw AnalysisError.noFrames
             }
+            // 次回の見積もりのために、1 フレームあたりの処理時間を記録する
+            ProcessingRate.save(
+                max(0.001, Date().timeIntervalSince(startTime) / Double(frames.count)),
+                usesRealModel: usesRealModel
+            )
             let imageSize = await processor.imageSize ?? .zero
 
             // チーム分類・追跡・局面判定・解説の選定
             phase = .analyzing
+            estimatedCompletionDate = nil
             analysisProgress = 0.97
             session.update(fraction: analysisProgress, subtitle: "戦術分析")
 
@@ -275,6 +333,8 @@ class VideoAnalysisViewModel {
 
         isAnalyzing = false
         phase = .idle
+        analysisStartDate = nil
+        estimatedCompletionDate = nil
         analysisTask = nil
         backgroundSession = nil
     }
@@ -285,7 +345,24 @@ class VideoAnalysisViewModel {
         currentFrame = current
         totalFrames = max(totalFrames, current)
         analysisProgress = Double(current) / Double(totalFrames) * 0.95
-        backgroundSession?.update(fraction: analysisProgress, subtitle: "物体検出 \(current)/\(totalFrames)")
+        updateEstimate()
+        backgroundSession?.update(fraction: analysisProgress, subtitle: progressDescription)
+    }
+
+    /// 実測のペースから完了見込み時刻を更新する（最初の数フレームは前回の計測値を使う）
+    private func updateEstimate() {
+        guard let analysisStartDate else { return }
+        let now = Date()
+        let rate = currentFrame >= 3
+            ? now.timeIntervalSince(analysisStartDate) / Double(currentFrame)
+            : previousRate
+        estimatedCompletionDate = rate.map { now.addingTimeInterval($0 * Double(max(0, totalFrames - currentFrame))) }
+    }
+
+    /// スクリーンショット用のデモデータを解析結果として表示する
+    func showDemo(record: SavedAnalysis) {
+        videoURL = URL.temporaryDirectory.appending(path: record.videoName)
+        currentRecordID = record.id
     }
 
     /// 解析結果を確認済みにする

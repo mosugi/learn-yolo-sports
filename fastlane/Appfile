@@ -1,0 +1,5 @@
+# App Store Connect 上のアプリを識別するための設定
+# Xcode の PRODUCT_BUNDLE_IDENTIFIER / DEVELOPMENT_TEAM と一致させる必要があります
+# （認証は App Store Connect API キーで行うため apple_id / itc_team_id は不要）
+app_identifier("com.mosugi.learn-yolo-sports")
+team_id("LHSVZBJ4CR")

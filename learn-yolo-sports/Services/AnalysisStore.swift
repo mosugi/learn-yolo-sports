@@ -9,6 +9,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
+import SwiftUI
 
 /// 解析結果の保存・読み込みを行うストア
 ///

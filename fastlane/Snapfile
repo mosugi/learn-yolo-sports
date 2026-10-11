@@ -1,0 +1,23 @@
+# fastlane snapshot の設定（UI テスト learn-yolo-sportsUITests/ScreenshotTests.swift で撮影）
+project("./learn-yolo-sports.xcodeproj")
+scheme("learn-yolo-sports")
+
+# App Store Connect で必須のサイズ: iPhone 6.9インチ / iPad 13インチ
+# 端末名は GitHub Actions のランナーイメージにあるものに合わせる
+devices([
+  "iPhone 18 Pro Max",
+  "iPad Pro 13-inch (M5)"
+])
+
+# 同名のシミュレータが複数 OS にある場合に備えて OS を指定
+ios_version("27.0")
+
+# アプリの UI は日本語のみ
+languages([
+  "ja"
+])
+
+output_directory("./fastlane/screenshots")
+clear_previous_screenshots(true)
+override_status_bar(true)
+skip_open_summary(true)

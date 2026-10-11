@@ -20,7 +20,7 @@ struct AnalysisResultView: View {
     }
 
     @State private var tab: Tab
-    @State private var showingAdvice = false
+    @State private var showingAdvice = LaunchOptions.showsAdvice
 
     init(record: SavedAnalysis) {
         self.record = record
