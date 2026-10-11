@@ -6,162 +6,398 @@
 //
 
 import SwiftUI
+import AVKit
 import UIKit
 
 /// 解析結果の表示（解析直後と履歴の両方で使う）
+///
+/// 動画の再生に合わせて、そのシーンのAI解説カードが自動で切り替わる。
+/// タイムラインやチャプターをタップすると、そのシーンへシークして再生する。
 struct AnalysisResultView: View {
+    @Environment(AnalysisStore.self) private var store
     let record: SavedAnalysis
-    let frames: [FrameDetectionResult]
-    
+
+    @State private var player = AVPlayer()
+    @State private var currentTime: Double = 0
+    @State private var showOverlay = true
+    @State private var timeObserver: Any?
+
+    // 動画ファイルがない古い記録向けのフレーム静止画表示
     @State private var selectedFrameIndex = 0
-    @State private var showingAdvice = false
-    
-    private var selectedFrame: FrameDetectionResult? {
-        guard frames.indices.contains(selectedFrameIndex) else { return nil }
-        return frames[selectedFrameIndex]
+    @State private var legacyImage: CGImage?
+
+    private var videoURL: URL? { store.videoURL(for: record) }
+
+    private var videoAspectRatio: CGFloat {
+        guard record.imageWidth > 0, record.imageHeight > 0 else { return 16.0 / 9.0 }
+        return CGFloat(record.imageWidth) / CGFloat(record.imageHeight)
     }
-    
+
+    private var currentSegment: SceneSegment? {
+        record.segments?.first { $0.contains(currentTime) }
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            if let frameResult = selectedFrame {
-                frameImage(frameResult)
-                    .background(Color.black)
-                    .frame(height: 300)
-                
-                // フレーム情報
-                VStack(spacing: 5) {
-                    Text("フレーム \(selectedFrameIndex + 1) / \(frames.count)（\(String(format: "%.1f", frameResult.timestamp))秒）")
+        ScrollView {
+            VStack(spacing: 16) {
+                if !record.usedRealModel {
+                    Label("モックモードの結果のため、検出・AI解説は参考になりません", systemImage: "exclamationmark.triangle")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                    
-                    Text("\(frameResult.detections.count) 個検出")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal)
                 }
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity)
-                .background(Color(.systemBackground))
-                
-                frameSlider
-                
-                Divider()
-                
-                // 検出リスト
-                if !frameResult.detections.isEmpty {
-                    DetectionListView(detections: frameResult.detections)
+
+                if let videoURL {
+                    playerSection(videoURL: videoURL)
+                    if let duration = record.videoDuration, duration > 0 {
+                        timelineBar(duration: duration)
+                            .padding(.horizontal)
+                    }
                 } else {
-                    ContentUnavailableView(
-                        "検出なし",
-                        systemImage: "magnifyingglass",
-                        description: Text("このフレームでは何も検出されませんでした")
-                    )
+                    legacyFrameBrowser
                 }
-                
-                statistics
+
+                commentarySection
+                teamLegendSection
+                chapterListSection
+                overallAdviceSection
+                statisticsSection
             }
+            .padding(.vertical, 12)
         }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 AnalysisShareMenu(record: record)
             }
-            
-            ToolbarItem(placement: .topBarLeading) {
-                Button {
-                    showingAdvice = true
-                } label: {
-                    Label("AIアドバイス", systemImage: "apple.intelligence")
+        }
+        .onAppear { setupPlayerIfNeeded() }
+        .onDisappear { teardownPlayer() }
+    }
+
+    // MARK: - Player
+
+    private func playerSection(videoURL: URL) -> some View {
+        GeometryReader { geo in
+            ZStack {
+                VideoPlayer(player: player)
+                if showOverlay, let frame = nearestFrame(to: currentTime) {
+                    DetectionOverlayView(detections: frame.detections, teams: record.teams, displaySize: geo.size)
+                        .allowsHitTesting(false)
+                }
+                // 注目時点の前後では選択肢の矢印も重ねる
+                if showOverlay, let segment = currentSegment, let tactics = segment.tactics,
+                   abs(currentTime - tactics.timestamp) <= 1.0 {
+                    TacticalArrowsView(snapshot: tactics, recommendedOptionID: segment.recommendedOptionID, displaySize: geo.size)
+                        .allowsHitTesting(false)
                 }
             }
         }
-        .sheet(isPresented: $showingAdvice) {
-            AdviceView(recordID: record.id)
-        }
-    }
-    
-    // MARK: - Components
-    
-    private func frameImage(_ frameResult: FrameDetectionResult) -> some View {
-        GeometryReader { geometry in
-            if let image = frameResult.image {
-                ZStack {
-                    Image(uiImage: UIImage(cgImage: image))
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                    
-                    DetectionOverlayView(
-                        detections: frameResult.detections,
-                        imageSize: CGSize(width: image.width, height: image.height),
-                        displaySize: geometry.size
-                    )
-                }
-            } else {
-                ContentUnavailableView("画像なし", systemImage: "photo")
-                    .foregroundStyle(.white)
-            }
-        }
-    }
-    
-    private var frameSlider: some View {
-        HStack {
+        .aspectRatio(videoAspectRatio, contentMode: .fit)
+        .background(Color.black)
+        .overlay(alignment: .topTrailing) {
             Button {
-                selectedFrameIndex -= 1
+                showOverlay.toggle()
             } label: {
-                Image(systemName: "chevron.left")
-                    .frame(width: 44, height: 44)
+                Image(systemName: showOverlay ? "eye.fill" : "eye.slash")
+                    .padding(8)
+                    .background(.black.opacity(0.5))
+                    .foregroundStyle(.white)
+                    .clipShape(Circle())
             }
-            .disabled(selectedFrameIndex == 0)
-            
-            if frames.count > 1 {
+            .padding(8)
+        }
+    }
+
+    private func setupPlayerIfNeeded() {
+        guard let videoURL, player.currentItem == nil else { return }
+        player.replaceCurrentItem(with: AVPlayerItem(url: videoURL))
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
+            queue: .main
+        ) { time in
+            currentTime = CMTimeGetSeconds(time)
+        }
+    }
+
+    private func teardownPlayer() {
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        player.pause()
+    }
+
+    private func seek(to time: Double) {
+        player.seek(to: CMTime(seconds: time, preferredTimescale: 600))
+        currentTime = time
+    }
+
+    private func nearestFrame(to time: Double) -> SavedFrame? {
+        record.frames.min { abs($0.timestamp - time) < abs($1.timestamp - time) }
+    }
+
+    // MARK: - Timeline
+
+    private func timelineBar(duration: Double) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color(.systemGray4)).frame(height: 6)
+
+                if let segments = record.segments {
+                    ForEach(segments) { segment in
+                        Group {
+                            Capsule()
+                                .fill(Color.accentColor.opacity(0.3))
+                                .frame(width: max(2, geo.size.width * CGFloat((segment.endTime - segment.startTime) / duration)), height: 6)
+                                .offset(x: geo.size.width * CGFloat(segment.startTime / duration))
+                            Circle()
+                                .fill(Color.accentColor)
+                                .frame(width: 8, height: 8)
+                                .offset(x: geo.size.width * CGFloat(segment.keyTime / duration) - 4, y: -1)
+                        }
+                    }
+                }
+
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 10, height: 10)
+                    .offset(x: geo.size.width * CGFloat(min(1, max(0, currentTime / duration))) - 5, y: -2)
+            }
+            .frame(height: 20)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0).onEnded { value in
+                    let fraction = max(0, min(1, value.location.x / geo.size.width))
+                    seek(to: fraction * duration)
+                }
+            )
+        }
+        .frame(height: 20)
+    }
+
+    // MARK: - Commentary
+
+    @ViewBuilder
+    private var commentarySection: some View {
+        if let segment = currentSegment {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: segment.kind.systemImage)
+                    Text(segment.commentary?.headline ?? segment.title)
+                        .font(.headline)
+                    Spacer()
+                    Text(timeRangeText(segment))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let commentary = segment.commentary {
+                    Text(commentary.commentary)
+                    Label(commentary.suggestion, systemImage: "lightbulb")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(record.adviceUnavailableReason ?? "この場面のAI解説はまだありません")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let tactics = segment.tactics, !tactics.options.isEmpty {
+                    Divider()
+                    TacticalBoardView(record: record, segment: segment, snapshot: tactics)
+                    Button {
+                        seek(to: tactics.timestamp)
+                        player.pause()
+                    } label: {
+                        Label("この局面を動画で見る", systemImage: "play.rectangle")
+                            .font(.caption)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(Color(.secondarySystemBackground))
+            .cornerRadius(12)
+            .padding(.horizontal)
+        }
+    }
+
+    // MARK: - Teams
+
+    @ViewBuilder
+    private var teamLegendSection: some View {
+        if let teams = record.teams, !teams.isEmpty {
+            HStack(spacing: 16) {
+                ForEach(teams) { team in
+                    HStack(spacing: 6) {
+                        Circle().fill(team.color.color).frame(width: 12, height: 12)
+                        Text(team.name).font(.caption)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal)
+        }
+    }
+
+    // MARK: - Chapters
+
+    @ViewBuilder
+    private var chapterListSection: some View {
+        if let segments = record.segments, !segments.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("チャプター")
+                    .font(.headline)
+                    .padding(.horizontal)
+
+                VStack(spacing: 8) {
+                    ForEach(segments) { segment in
+                        Button {
+                            seek(to: segment.keyTime)
+                            player.play()
+                        } label: {
+                            HStack {
+                                Image(systemName: segment.kind.systemImage)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(segment.commentary?.headline ?? segment.title)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.primary)
+                                    Text(timeRangeText(segment))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if segment.id == currentSegment?.id {
+                                    Image(systemName: "play.circle.fill")
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.vertical, 8)
+                            .background(Color(.systemBackground))
+                            .cornerRadius(10)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal)
+            }
+        }
+    }
+
+    private func timeRangeText(_ segment: SceneSegment) -> String {
+        "\(formatTime(segment.startTime))〜\(formatTime(segment.endTime))"
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    // MARK: - Overall Advice
+
+    @ViewBuilder
+    private var overallAdviceSection: some View {
+        if let advice = record.advice {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("総評").font(.headline)
+                Text(advice.summary)
+
+                if !advice.observations.isEmpty {
+                    bulletList(title: "観察ポイント", items: advice.observations)
+                }
+                if !advice.suggestions.isEmpty {
+                    bulletList(title: "改善提案", items: advice.suggestions)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(Color(.secondarySystemBackground))
+            .cornerRadius(12)
+            .padding(.horizontal)
+        } else if let reason = record.adviceUnavailableReason {
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+        }
+    }
+
+    private func bulletList(title: String, items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.subheadline).fontWeight(.semibold)
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("・")
+                    Text(item)
+                }
+                .font(.subheadline)
+            }
+        }
+    }
+
+    // MARK: - Statistics
+
+    private var statisticsSection: some View {
+        HStack(spacing: 20) {
+            StatView(title: "総検出数", value: "\(record.totalDetections)", icon: "scope")
+            StatView(title: "平均", value: String(format: "%.1f", record.averageDetectionsPerFrame), icon: "chart.bar")
+            StatView(title: "処理時間", value: String(format: "%.0fs", record.processingDuration), icon: "clock")
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
+        .padding(.horizontal)
+    }
+
+    // MARK: - Legacy Frame Browser（動画ファイルがない古い記録向け）
+
+    private var legacyFrameBrowser: some View {
+        VStack(spacing: 0) {
+            GeometryReader { geo in
+                ZStack {
+                    if let legacyImage {
+                        Image(uiImage: UIImage(cgImage: legacyImage))
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                    } else {
+                        ProgressView()
+                    }
+                    if record.frames.indices.contains(selectedFrameIndex) {
+                        DetectionOverlayView(
+                            detections: record.frames[selectedFrameIndex].detections,
+                            teams: record.teams,
+                            displaySize: geo.size
+                        )
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
+            .frame(height: 300)
+            .background(Color.black)
+
+            if record.frames.count > 1 {
                 Slider(
                     value: Binding(
                         get: { Double(selectedFrameIndex) },
                         set: { selectedFrameIndex = Int($0) }
                     ),
-                    in: 0...Double(frames.count - 1),
+                    in: 0...Double(record.frames.count - 1),
                     step: 1
                 )
-            } else {
-                Spacer()
+                .padding()
+                .onChange(of: selectedFrameIndex) { _, _ in loadLegacyImage() }
             }
-            
-            Button {
-                selectedFrameIndex += 1
-            } label: {
-                Image(systemName: "chevron.right")
-                    .frame(width: 44, height: 44)
-            }
-            .disabled(selectedFrameIndex >= frames.count - 1)
         }
-        .padding(.horizontal)
+        .task { loadLegacyImage() }
     }
-    
-    private var statistics: some View {
-        VStack(spacing: 10) {
-            Divider()
-            
-            HStack(spacing: 20) {
-                StatView(
-                    title: "総検出数",
-                    value: "\(record.totalDetections)",
-                    icon: "scope"
-                )
-                
-                StatView(
-                    title: "平均",
-                    value: String(format: "%.1f", record.averageDetectionsPerFrame),
-                    icon: "chart.bar"
-                )
-                
-                StatView(
-                    title: "処理時間",
-                    value: String(format: "%.1fs", record.processingDuration),
-                    icon: "clock"
-                )
-            }
-            .padding()
+
+    private func loadLegacyImage() {
+        guard record.frames.indices.contains(selectedFrameIndex) else { return }
+        let frameNumber = record.frames[selectedFrameIndex].frameNumber
+        Task {
+            legacyImage = await store.loadFrameImage(for: record, frameNumber: frameNumber)
         }
-        .background(Color(.secondarySystemBackground))
     }
 }
 
@@ -171,33 +407,44 @@ struct AnalysisResultView: View {
 struct AnalysisShareMenu: View {
     @Environment(AnalysisStore.self) private var store
     let record: SavedAnalysis
-    
+
+    // record は再生中の0.5秒ごとの更新で body が再評価されるたびに作り直されるため、
+    // 重い markdown 生成は .task(id:) に移し、record.id が変わらない限り再計算しない
+    @State private var report: String?
+
     var body: some View {
-        let report = AnalysisReport.markdown(for: record)
-        
         Menu {
-            ShareLink(
-                item: report,
-                subject: Text("サッカー動画の解析結果"),
-                preview: SharePreview("解析結果（LLM向けテキスト）")
-            ) {
-                Label("LLM向けテキストを共有", systemImage: "text.bubble")
+            if let report {
+                ShareLink(
+                    item: report,
+                    subject: Text("サッカー動画の解析結果"),
+                    preview: SharePreview("解析結果（LLM向けテキスト）")
+                ) {
+                    Label("LLM向けテキストを共有", systemImage: "text.bubble")
+                }
+
+                Button {
+                    UIPasteboard.general.string = report
+                } label: {
+                    Label("LLM向けテキストをコピー", systemImage: "doc.on.doc")
+                }
+            } else {
+                Text("準備中...")
             }
-            
-            Button {
-                UIPasteboard.general.string = report
-            } label: {
-                Label("LLM向けテキストをコピー", systemImage: "doc.on.doc")
-            }
-            
+
             let jsonURL = store.jsonURL(for: record)
-            if FileManager.default.fileExists(atPath: jsonURL.path()) {
+            if FileManager.default.fileExists(atPath: jsonURL.path(percentEncoded: false)) {
                 ShareLink(item: jsonURL, preview: SharePreview("analysis.json")) {
                     Label("JSONを共有", systemImage: "curlybraces")
                 }
             }
         } label: {
             Label("共有", systemImage: "square.and.arrow.up")
+        }
+        .task(id: record.id) {
+            if report == nil {
+                report = AnalysisReport.markdown(for: record)
+            }
         }
     }
 }
@@ -208,17 +455,17 @@ struct StatView: View {
     let title: String
     let value: String
     let icon: String
-    
+
     var body: some View {
         VStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.title3)
                 .foregroundStyle(.blue)
-            
+
             Text(value)
                 .font(.title3)
                 .fontWeight(.bold)
-            
+
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.secondary)

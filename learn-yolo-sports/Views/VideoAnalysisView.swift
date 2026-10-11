@@ -12,53 +12,42 @@ struct VideoAnalysisView: View {
     @Environment(VideoAnalysisViewModel.self) private var viewModel
     @Environment(AnalysisStore.self) private var store
     @State private var selectedVideoItem: PhotosPickerItem?
-    @State private var showingSettings = false
-    @State private var framesPerSecond = 2
-    @State private var maxFrames = 30
-    
+    @State private var isLoadingVideo = false
+    /// 動画読み込み（iCloud からのダウンロードを含む）の進捗
+    @State private var videoLoadProgress: Progress?
+    @State private var videoLoadDuration: Double?
+
     var body: some View {
         NavigationStack {
             ZStack {
-                if let _ = viewModel.videoURL, viewModel.hasResults {
+                if viewModel.hasResults {
                     // 解析結果表示
                     analysisResultView
-                } else if viewModel.videoURL != nil {
-                    // 動画選択済み（解析待ち・解析中）
-                    analysisSetupView
+                } else if viewModel.isAnalyzing {
+                    // 解析中（検出・チーム分け・シーン区切り・AI解説の生成まで自動で進む）
+                    analyzingView
                 } else {
-                    // 動画未選択
+                    // 動画未選択（中断された解析があればここに表示する）
                     videoPickerView
                 }
             }
             .navigationTitle("スポーツ動画解析")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if viewModel.videoURL != nil {
+                if viewModel.hasResults {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             viewModel.reset()
                             selectedVideoItem = nil
+                            videoLoadDuration = nil
                         } label: {
                             Label("リセット", systemImage: "arrow.clockwise")
-                        }
-                    }
-                }
-                
-                if !viewModel.isAnalyzing && viewModel.videoURL != nil && !viewModel.hasResults {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            showingSettings.toggle()
-                        } label: {
-                            Label("設定", systemImage: "gearshape")
                         }
                     }
                 }
             }
             .task {
                 await viewModel.checkModel()
-            }
-            .sheet(isPresented: $showingSettings) {
-                settingsSheet
             }
             .onChange(of: selectedVideoItem) { oldValue, newValue in
                 Task {
@@ -67,92 +56,79 @@ struct VideoAnalysisView: View {
             }
         }
     }
-    
+
     // MARK: - Video Picker View
-    
+
     private var videoPickerView: some View {
-        VStack(spacing: 30) {
-            Image(systemName: "video.badge.waveform")
-                .font(.system(size: 100))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.blue, .purple],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .symbolEffect(.bounce, options: .repeating)
-            
-            VStack(spacing: 10) {
-                Text("スポーツ動画を解析")
-                    .font(.title)
-                    .fontWeight(.bold)
-                
-                Text("YOLOで選手・審判・ボールを自動検出")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            
-            PhotosPicker(
-                selection: $selectedVideoItem,
-                matching: .videos
-            ) {
-                Label("動画を選択", systemImage: "photo.on.rectangle")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(
+        ScrollView {
+            VStack(spacing: 30) {
+                if !store.interrupted.isEmpty {
+                    VStack(spacing: 12) {
+                        ForEach(store.interrupted) { checkpoint in
+                            interruptedCard(checkpoint)
+                        }
+                    }
+                    .padding(.top, 20)
+                }
+
+                Image(systemName: "video.badge.waveform")
+                    .font(.system(size: 100))
+                    .foregroundStyle(
                         LinearGradient(
                             colors: [.blue, .purple],
-                            startPoint: .leading,
-                            endPoint: .trailing
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
                         )
                     )
-                    .foregroundStyle(.white)
-                    .cornerRadius(12)
-            }
-            .padding(.horizontal, 40)
-        }
-    }
-    
-    // MARK: - Analysis Setup View
-    
-    private var analysisSetupView: some View {
-        VStack(spacing: 30) {
-            if let url = viewModel.videoURL {
-                // 動画プレビュー
-                VideoPlayerView(videoURL: url)
-                    .frame(height: 250)
-                    .cornerRadius(12)
-                    .shadow(radius: 5)
-                    .padding()
-                
-                VStack(spacing: 15) {
-                    Text(url.lastPathComponent)
-                        .font(.headline)
-                        .lineLimit(1)
-                    
-                    HStack(spacing: 20) {
-                        Label("\(framesPerSecond) FPS", systemImage: "film")
-                        Label("最大 \(maxFrames) フレーム", systemImage: "photo.stack")
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    
-                    if let isUsingRealModel = viewModel.isUsingRealModel {
-                        Label(
-                            isUsingRealModel ? "サッカー検出モデル" : "モックモード（モデル未配置）",
-                            systemImage: isUsingRealModel ? "cpu" : "exclamationmark.triangle"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(isUsingRealModel ? .green : .orange)
-                    }
-                }
-                
-                if viewModel.isAnalyzing {
-                    analysisProgressCard
+                    .symbolEffect(.bounce, options: .repeating)
+                    .padding(.top, store.interrupted.isEmpty ? 40 : 0)
+
+                VStack(spacing: 10) {
+                    Text("スポーツ動画を解析")
+                        .font(.title)
+                        .fontWeight(.bold)
+
+                    Text("動画を選ぶと、全編の検出からAI解説の生成までを自動で行います")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
+                }
+
+                if isLoadingVideo {
+                    VStack(spacing: 10) {
+                        if let videoLoadProgress {
+                            ProgressView(videoLoadProgress)
+                                .progressViewStyle(.linear)
+                        } else {
+                            ProgressView()
+                        }
+                        Text("動画を読み込み中...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 40)
                 } else {
+                    PhotosPicker(
+                        selection: $selectedVideoItem,
+                        matching: .videos
+                    ) {
+                        Label("動画を選択", systemImage: "photo.on.rectangle")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(
+                                LinearGradient(
+                                    colors: [.blue, .purple],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .foregroundStyle(.white)
+                            .cornerRadius(12)
+                    }
+                    .padding(.horizontal, 40)
+
                     if let errorMessage = viewModel.errorMessage {
                         Text(errorMessage)
                             .font(.caption)
@@ -160,46 +136,109 @@ struct VideoAnalysisView: View {
                             .multilineTextAlignment(.center)
                             .padding(.horizontal)
                     }
-                    
-                    startButton(url: url)
+                }
+
+                Spacer(minLength: 20)
+            }
+        }
+    }
+
+    // MARK: - Interrupted Analysis Card
+
+    private func interruptedCard(_ checkpoint: AnalysisCheckpoint) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("中断された解析", systemImage: "exclamationmark.triangle")
+                .font(.headline)
+                .foregroundStyle(.orange)
+
+            Text(checkpoint.videoFileName)
+                .font(.subheadline)
+                .lineLimit(1)
+
+            Text(stageDescription(checkpoint))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ProgressView(value: Double(checkpoint.lastProcessedFrame), total: Double(max(1, checkpoint.totalFrames)))
+
+            HStack {
+                Button("破棄", role: .destructive) {
+                    store.discardCheckpoint(checkpoint)
+                }
+                Spacer()
+                Button("再開") {
+                    viewModel.resumeAnalysis(checkpoint)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
+        .padding(.horizontal, 24)
+    }
+
+    private func stageDescription(_ checkpoint: AnalysisCheckpoint) -> String {
+        switch checkpoint.stage {
+        case .detecting:
+            return "物体検出 \(checkpoint.lastProcessedFrame)/\(checkpoint.totalFrames) フレーム"
+        case .segmenting:
+            return "シーンを区切る前で中断しました"
+        case .commentating:
+            let done = checkpoint.segments?.filter { $0.commentary != nil }.count ?? 0
+            let total = checkpoint.segments?.count ?? 0
+            return "シーン解説 \(done)/\(total)"
+        }
+    }
+
+    // MARK: - Analyzing View
+
+    private var analyzingView: some View {
+        VStack(spacing: 30) {
+            if let url = viewModel.activeVideoURL {
+                VideoPlayerView(videoURL: url)
+                    .frame(height: 250)
+                    .cornerRadius(12)
+                    .shadow(radius: 5)
+                    .padding()
+            }
+
+            VStack(spacing: 15) {
+                Text(viewModel.activeVideoURL?.lastPathComponent ?? "")
+                    .font(.headline)
+                    .lineLimit(1)
+
+                if let isUsingRealModel = viewModel.isUsingRealModel {
+                    Label(
+                        isUsingRealModel ? "サッカー検出モデル" : "モックモード（モデル未配置）",
+                        systemImage: isUsingRealModel ? "cpu" : "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(isUsingRealModel ? .green : .orange)
                 }
             }
-            
+
+            analysisProgressCard
+                .padding(.horizontal, 40)
+
+            if let errorMessage = viewModel.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+
             Spacer()
         }
     }
-    
-    private func startButton(url: URL) -> some View {
-        Button {
-            viewModel.startAnalysis(
-                url: url,
-                framesPerSecond: framesPerSecond,
-                maxFrames: maxFrames
-            )
-        } label: {
-            Label("解析開始", systemImage: "play.fill")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding()
-                .background(
-                    LinearGradient(
-                        colors: [.green, .blue],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
-                .foregroundStyle(.white)
-                .cornerRadius(12)
-        }
-        .padding(.horizontal, 40)
-    }
-    
+
     // MARK: - Analysis Result View
-    
+
     @ViewBuilder
     private var analysisResultView: some View {
         if let id = viewModel.currentRecordID, let record = store.record(for: id) {
-            AnalysisResultView(record: record, frames: viewModel.detectionResults)
+            AnalysisResultView(record: record)
                 .id(id)
         } else if let errorMessage = viewModel.errorMessage {
             ContentUnavailableView(
@@ -209,9 +248,9 @@ struct VideoAnalysisView: View {
             )
         }
     }
-    
+
     // MARK: - Analysis Progress
-    
+
     /// 解析中の進捗（操作をブロックしない）
     private var analysisProgressCard: some View {
         VStack(spacing: 12) {
@@ -225,22 +264,22 @@ struct VideoAnalysisView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
-            
+
             ProgressView(value: viewModel.analysisProgress)
                 .progressViewStyle(.linear)
-            
+
             HStack {
-                Text("フレーム \(viewModel.currentFrame) / \(viewModel.totalFrames)")
+                Text(viewModel.progressDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("キャンセル", role: .cancel) {
+                Button("一時停止", role: .cancel) {
                     viewModel.cancelAnalysis()
                 }
                 .font(.caption)
             }
-            
-            Text("他のタブへの移動やアプリを閉じても解析は続きます")
+
+            Text("他のタブへの移動やアプリを閉じても解析は続きます。中断しても続きから再開できます。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -249,51 +288,63 @@ struct VideoAnalysisView: View {
         .background(Color(.secondarySystemBackground))
         .cornerRadius(12)
     }
-    
-    // MARK: - Settings Sheet
-    
-    private var settingsSheet: some View {
-        NavigationStack {
-            Form {
-                Section("抽出設定") {
-                    Stepper("フレームレート: \(framesPerSecond) FPS", value: $framesPerSecond, in: 1...10)
-                    Stepper("最大フレーム数: \(maxFrames)", value: $maxFrames, in: 10...100, step: 10)
-                }
-                
-                Section("説明") {
-                    Text("フレームレートが高いほど詳細な解析ができますが、処理時間が長くなります。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("解析設定")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完了") {
-                        showingSettings = false
-                    }
-                }
-            }
-        }
-        .presentationDetents([.medium])
-    }
-    
+
     // MARK: - Helper Methods
-    
+
     private func loadVideo(from item: PhotosPickerItem?) async {
-        guard let item = item else { return }
-        
+        guard let item = item, !isLoadingVideo else { return }
+
+        isLoadingVideo = true
+        videoLoadDuration = nil
+        let startTime = Date()
+
         do {
-            guard let movie = try await item.loadTransferable(type: VideoTransferable.self) else {
+            guard let movie = try await loadMovie(from: item) else {
                 viewModel.errorMessage = "動画の読み込みに失敗しました"
+                isLoadingVideo = false
+                videoLoadProgress = nil
                 return
             }
-            
-            viewModel.videoURL = movie.url
-            
+
+            videoLoadDuration = Date().timeIntervalSince(startTime)
+            isLoadingVideo = false
+            videoLoadProgress = nil
+            viewModel.startNewAnalysis(videoAt: movie.url)
+
         } catch {
             viewModel.errorMessage = "エラー: \(error.localizedDescription)"
+            isLoadingVideo = false
+            videoLoadProgress = nil
+        }
+    }
+
+    /// 進捗付きで動画を読み込む（async 版の loadTransferable は Progress を返さないため）
+    private func loadMovie(from item: PhotosPickerItem) async throws -> VideoTransferable? {
+        try await withCheckedThrowingContinuation { continuation in
+            videoLoadProgress = item.loadTransferable(type: VideoTransferable.self) { result in
+                continuation.resume(with: result)
+            }
+        }
+    }
+}
+
+// 動画を転送可能にするための構造体
+struct VideoTransferable: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { video in
+            SentTransferredFile(video.url)
+        } importing: { received in
+            let fileName = received.file.lastPathComponent
+            let copy = URL.documentsDirectory.appending(path: fileName)
+
+            if FileManager.default.fileExists(atPath: copy.path(percentEncoded: false)) {
+                try FileManager.default.removeItem(at: copy)
+            }
+
+            try FileManager.default.copyItem(at: received.file, to: copy)
+            return Self(url: copy)
         }
     }
 }

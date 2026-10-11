@@ -255,6 +255,8 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "learn-yolo-sports-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "サッカー動画解析";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "スポーツ動画を撮影して解析するためにカメラにアクセスします";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声付き動画を撮影するためにマイクにアクセスします";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "スポーツ動画を解析するためにフォトライブラリにアクセスします";
@@ -291,6 +293,8 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "learn-yolo-sports-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "サッカー動画解析";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "スポーツ動画を撮影して解析するためにカメラにアクセスします";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "音声付き動画を撮影するためにマイクにアクセスします";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "スポーツ動画を解析するためにフォトライブラリにアクセスします";

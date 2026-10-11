@@ -10,11 +10,18 @@ import SwiftUI
 /// 保存済みの解析結果の一覧
 struct HistoryView: View {
     @Environment(AnalysisStore.self) private var store
-    
+    @Environment(VideoAnalysisViewModel.self) private var viewModel
+
+    /// 現在パイプラインが処理中のチェックポイントは、見た目は「中断」のままだが実際は書き込み中なので、
+    /// ここから再開・破棄できる一覧には出さない（出すと削除と書き込みが競合する）
+    private var displayedInterrupted: [AnalysisCheckpoint] {
+        store.interrupted.filter { $0.id != viewModel.processingCheckpointID }
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                if store.records.isEmpty {
+                if store.records.isEmpty && displayedInterrupted.isEmpty {
                     ContentUnavailableView(
                         "解析結果はまだありません",
                         systemImage: "clock.arrow.circlepath",
@@ -22,6 +29,20 @@ struct HistoryView: View {
                     )
                 } else {
                     List {
+                        if !displayedInterrupted.isEmpty {
+                            Section("解析中断") {
+                                ForEach(displayedInterrupted) { checkpoint in
+                                    InterruptedRow(checkpoint: checkpoint)
+                                }
+                                .onDelete { offsets in
+                                    let targets = offsets.map { displayedInterrupted[$0] }
+                                    for checkpoint in targets {
+                                        store.discardCheckpoint(checkpoint)
+                                    }
+                                }
+                            }
+                        }
+
                         ForEach(store.records) { record in
                             NavigationLink(value: record.id) {
                                 HistoryRow(record: record)
@@ -65,7 +86,10 @@ private struct HistoryRow: View {
                 .foregroundStyle(.secondary)
             
             HStack(spacing: 12) {
-                Label("\(record.frames.count) フレーム", systemImage: "photo.stack")
+                if let duration = record.videoDuration {
+                    Label(durationText(duration), systemImage: "clock")
+                }
+                Label("\(record.segments?.count ?? 0) シーン", systemImage: "list.bullet.rectangle")
                 Label("\(record.totalDetections) 検出", systemImage: "scope")
                 if !record.usedRealModel {
                     Label("モック", systemImage: "exclamationmark.triangle")
@@ -77,32 +101,53 @@ private struct HistoryRow: View {
         }
         .padding(.vertical, 2)
     }
+
+    private func durationText(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// 中断された解析の1行
+private struct InterruptedRow: View {
+    @Environment(AnalysisStore.self) private var store
+    @Environment(VideoAnalysisViewModel.self) private var viewModel
+    let checkpoint: AnalysisCheckpoint
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(checkpoint.videoFileName)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("\(checkpoint.lastProcessedFrame)/\(checkpoint.totalFrames) フレーム")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("再開") {
+                viewModel.resumeAnalysis(checkpoint)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.vertical, 2)
+    }
 }
 
 /// 保存済みの解析結果の詳細
 struct HistoryDetailView: View {
-    @Environment(AnalysisStore.self) private var store
     let record: SavedAnalysis
-    
-    @State private var frames: [FrameDetectionResult]?
-    
+
     var body: some View {
-        Group {
-            if let frames {
-                AnalysisResultView(record: record, frames: frames)
-            } else {
-                ProgressView("読み込み中...")
-            }
-        }
-        .navigationTitle(record.videoName)
-        .navigationBarTitleDisplayMode(.inline)
-        .task(id: record.id) {
-            frames = await store.loadFrames(for: record)
-        }
+        AnalysisResultView(record: record)
+            .navigationTitle(record.videoName)
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
 #Preview {
+    let store = AnalysisStore()
     HistoryView()
-        .environment(AnalysisStore())
+        .environment(store)
+        .environment(VideoAnalysisViewModel(store: store))
 }

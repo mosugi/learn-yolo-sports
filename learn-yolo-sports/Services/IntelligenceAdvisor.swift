@@ -8,44 +8,53 @@
 import Foundation
 import FoundationModels
 
-/// オンデバイス LLM に生成させるアドバイスの構造
+/// オンデバイス LLM に生成させる全体総評の構造
 @Generable
 nonisolated struct GeneratedAdvice {
-    @Guide(description: "この時間帯の試合状況の総評。2〜3文の日本語")
+    @Guide(description: "試合全体の総評。2〜3文の日本語")
     var summary: String
-    
+
     @Guide(description: "指標から読み取れる観察ポイント。根拠となる数値に触れた短い日本語の文", .count(3))
     var observations: [String]
-    
+
     @Guide(description: "チームや選手への具体的な改善提案。短い日本語の文", .count(3))
     var suggestions: [String]
 }
 
+/// オンデバイス LLM に生成させるシーン解説の構造
+@Generable
+nonisolated struct GeneratedSceneCommentary {
+    @Guide(description: "このシーンの見出し。10文字程度の日本語")
+    var headline: String
+
+    @Guide(description: "このシーンの状況説明。2〜3文の日本語")
+    var commentary: String
+
+    @Guide(description: "このシーンに対する具体的な一言アドバイス。選択肢の候補がある場合はどれを選ぶべきかに触れる。1文の日本語")
+    var suggestion: String
+
+    @Guide(description: "選択肢の候補それぞれへの短い評価（利点とリスク）。候補と同じ順番・同じ数の日本語の文。候補がなければ空の配列")
+    var optionComments: [String]
+
+    @Guide(description: "最もおすすめする選択肢の候補番号。候補がなければ0")
+    var recommendedOption: Int
+}
+
 /// Apple Intelligence（Foundation Models）を使って解析結果へのアドバイスを生成する
-@MainActor
-@Observable
-final class IntelligenceAdvisor {
-    
-    enum State {
-        case idle
-        case generating
-        case failed(String)
-    }
-    
-    private(set) var state: State = .idle
-    /// 生成途中の内容（ストリーミング表示用）
-    private(set) var partial: GeneratedAdvice.PartiallyGenerated?
-    
-    private var generationTask: Task<Void, Never>?
-    
+///
+/// UI の状態は持たず、ViewModel のパイプラインから呼ばれる async なサービス。
+/// シーンごとに新しい `LanguageModelSession` を作ることで、コンテキスト長を抑える。
+nonisolated enum IntelligenceAdvisor {
+
     private static let instructions = """
         あなたはサッカーの戦術コーチです。
         試合動画を物体検出して得た指標をもとに、選手とチームに向けたアドバイスを日本語で返してください。
-        検出にはチームの区別がなく、見逃しや誤検出も含まれます。数値から言えることだけを述べ、断定しすぎないでください。
+        ユニフォームの色でチームを自動判定していますが、選手の個体識別やボール保持の判定は行っていません。
+        検出には見逃しや誤検出も含まれます。数値から言えることだけを述べ、断定しすぎないでください。
         """
-    
+
     /// 端末で Apple Intelligence を利用できない場合の理由（利用できる場合は nil）
-    var unavailableReason: String? {
+    static var unavailableReason: String? {
         switch SystemLanguageModel.default.availability {
         case .available:
             return nil
@@ -59,61 +68,67 @@ final class IntelligenceAdvisor {
             return "Apple Intelligence を利用できません（\(reason)）。"
         }
     }
-    
-    var isGenerating: Bool {
-        if case .generating = state { return true }
-        return false
+
+    /// 試合全体の総評を生成する
+    static func overallAdvice(for record: SavedAnalysis) async throws -> AnalysisAdvice {
+        let session = LanguageModelSession(instructions: instructions)
+        let response = try await session.respond(to: overallPrompt(for: record), generating: GeneratedAdvice.self)
+        let generated = response.content
+        return AnalysisAdvice(
+            summary: generated.summary,
+            observations: generated.observations,
+            suggestions: generated.suggestions,
+            generatedAt: Date()
+        )
     }
-    
-    /// アドバイスを生成する
-    /// - Parameter onComplete: 生成完了時に結果を受け取る
-    func generate(for record: SavedAnalysis, onComplete: @escaping (AnalysisAdvice) -> Void) {
-        guard !isGenerating else { return }
-        
-        state = .generating
-        partial = nil
-        
-        generationTask = Task {
-            do {
-                let session = LanguageModelSession(instructions: Self.instructions)
-                let stream = session.streamResponse(
-                    to: Self.prompt(for: record),
-                    generating: GeneratedAdvice.self
-                )
-                
-                for try await snapshot in stream {
-                    partial = snapshot.content
-                }
-                
-                let advice = AnalysisAdvice(
-                    summary: partial?.summary ?? "",
-                    observations: partial?.observations ?? [],
-                    suggestions: partial?.suggestions ?? [],
-                    generatedAt: Date()
-                )
-                state = .idle
-                onComplete(advice)
-                
-            } catch is CancellationError {
-                state = .idle
-            } catch let error as LanguageModelSession.GenerationError {
-                state = .failed(Self.message(for: error))
-            } catch {
-                state = .failed("アドバイスの生成に失敗しました: \(error.localizedDescription)")
+
+    /// シーン別の解説を生成する（解説者がこの場面まで進めて解説するイメージ）
+    static func sceneCommentary(
+        for segment: SceneSegment,
+        metrics: AnalysisMetrics,
+        teams: [TeamInfo]?,
+        usedRealModel: Bool
+    ) async throws -> SceneCommentary {
+        let session = LanguageModelSession(instructions: instructions)
+        let prompt = scenePrompt(segment: segment, metrics: metrics, teams: teams, usedRealModel: usedRealModel)
+        let response = try await session.respond(to: prompt, generating: GeneratedSceneCommentary.self)
+        let generated = response.content
+
+        let options = segment.tactics?.options ?? []
+        // 数が合わない・存在しない番号のときは使わない（画面では幾何計算の説明・おすすめにフォールバックする）
+        let comments = generated.optionComments.count == options.count && !options.isEmpty ? generated.optionComments : nil
+        let recommended = options.contains { $0.id == generated.recommendedOption } ? generated.recommendedOption : nil
+        return SceneCommentary(
+            headline: generated.headline,
+            commentary: generated.commentary,
+            suggestion: generated.suggestion,
+            optionComments: comments,
+            recommendedOptionID: recommended
+        )
+    }
+
+    /// エラーを表示用の日本語メッセージに変換する
+    static func errorMessage(for error: Error) -> String {
+        if let generationError = error as? LanguageModelSession.GenerationError {
+            switch generationError {
+            case .exceededContextWindowSize:
+                return "入力が長すぎるため生成できませんでした。"
+            case .guardrailViolation:
+                return "安全上の理由により生成できませんでした。"
+            case .unsupportedLanguageOrLocale:
+                return "現在の言語設定ではアドバイスを生成できません。"
+            default:
+                return "アドバイスの生成に失敗しました: \(generationError.localizedDescription)"
             }
-            generationTask = nil
         }
+        return "アドバイスの生成に失敗しました: \(error.localizedDescription)"
     }
-    
-    func cancel() {
-        generationTask?.cancel()
-    }
-    
+
     // MARK: - Prompt
-    
-    private static func prompt(for record: SavedAnalysis) -> String {
+
+    private static func overallPrompt(for record: SavedAnalysis) -> String {
         var lines: [String] = []
-        lines.append("以下はサッカー動画の物体検出から算出した指標です。")
+        lines.append("以下はサッカー動画全体の物体検出から算出した指標です。")
         if !record.usedRealModel {
             lines.append("（注意: これはテスト用のランダムな検出結果です）")
         }
@@ -121,20 +136,45 @@ final class IntelligenceAdvisor {
         lines.append(AnalysisMetrics(record: record).summaryText)
         lines.append("")
         lines.append("位置はカメラ画面上の位置で、ピッチ上の絶対位置ではありません。")
-        lines.append("この指標から、試合状況の総評、観察ポイント、改善提案を作成してください。")
+        lines.append("この指標から、試合全体の総評、観察ポイント、改善提案を作成してください。")
         return lines.joined(separator: "\n")
     }
-    
-    private static func message(for error: LanguageModelSession.GenerationError) -> String {
-        switch error {
-        case .exceededContextWindowSize:
-            return "入力が長すぎるため生成できませんでした。"
-        case .guardrailViolation:
-            return "安全上の理由により生成できませんでした。"
-        case .unsupportedLanguageOrLocale:
-            return "現在の言語設定ではアドバイスを生成できません。"
-        default:
-            return "アドバイスの生成に失敗しました: \(error.localizedDescription)"
+
+    private static func scenePrompt(segment: SceneSegment, metrics: AnalysisMetrics, teams: [TeamInfo]?, usedRealModel: Bool) -> String {
+        var lines: [String] = []
+        lines.append("以下はサッカー動画の \(Int(segment.startTime))秒〜\(Int(segment.endTime))秒（注目時点 \(Int(segment.keyTime))秒）の物体検出から算出した指標です。")
+        lines.append("場面の種類（スコアからの機械的な分類）: \(segment.kind.japaneseName)")
+        if !usedRealModel {
+            lines.append("（注意: これはテスト用のランダムな検出結果です）")
         }
+        lines.append("")
+        lines.append(metrics.summaryText)
+        lines.append("")
+        lines.append("位置はカメラ画面上の位置で、ピッチ上の絶対位置ではありません。")
+        lines.append("")
+        lines.append(tacticsText(segment.tactics, teams: teams))
+        lines.append("")
+        lines.append("この場面の見出し、状況説明、具体的なアドバイス、選択肢の候補それぞれへの評価とおすすめの番号を作成してください。")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func tacticsText(_ tactics: TacticalSnapshot?, teams: [TeamInfo]?) -> String {
+        guard let tactics, !tactics.options.isEmpty else {
+            return "選択肢の候補: なし（ボール保持者を判定できませんでした）"
+        }
+        let teamName = teams?.first { $0.id == tactics.attackingTeam }?.name ?? "保持チーム"
+        var lines = ["\(Int(tactics.timestamp))秒時点で\(teamName)がボールを保持しています。画面上の位置関係から計算した選択肢の候補:"]
+        for option in tactics.options {
+            lines.append(String(
+                format: "%d. %@（距離 %.2f、到達点のフリー度 %.2f、コースの空き %.2f）",
+                option.id,
+                option.summary,
+                option.length,
+                option.openness,
+                option.laneClearance
+            ))
+        }
+        lines.append("距離・フリー度・コースの空きは画面の高さを1とした値で、大きいほど相手から離れています。")
+        return lines.joined(separator: "\n")
     }
 }

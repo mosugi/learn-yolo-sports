@@ -6,153 +6,75 @@
 //
 
 import AVFoundation
-import CoreImage
-import UIKit
+import CoreGraphics
 
-/// 抽出したフレーム
-nonisolated struct ExtractedFrame {
-    let image: CGImage
-    /// 動画先頭からの時刻（秒）
-    let timestamp: Double
+/// 動画の長さと、1秒おきに抽出した場合の総フレーム数
+nonisolated struct VideoInfo: Sendable {
+    let duration: Double
+    let totalFrames: Int
 }
 
-/// 動画からフレームを抽出するクラス
+/// 動画から指定秒のフレームを抽出するクラス
+///
+/// 動画ごとに `AVAssetImageGenerator` をキャッシュして再利用する。actor は await で中断するたびに
+/// 再入可能になるため、このキャッシュ検索自体はすぐ戻り、複数フレームの生成は並行に進む。
+/// 毎フレームごとに asset を作り直すと、ファイルの再オープンと moov atom の再解析が
+/// フレーム数分繰り返されるため、ここでまとめて避ける。
 actor VideoFrameExtractor {
-    
-    /// フレーム抽出の進捗を通知するクロージャ
-    typealias ProgressHandler = @Sendable (Int, Int) async -> Void
-    
-    /// 動画URLからフレームを抽出
-    /// - Parameters:
-    ///   - url: 動画のURL
-    ///   - fps: 抽出するフレームレート（デフォルト: 1フレーム/秒）
-    ///   - maxFrames: 最大抽出フレーム数（デフォルト: 100）
-    ///   - progressHandler: 進捗ハンドラー
-    /// - Returns: 抽出されたフレームの配列
-    func extractFrames(
-        from url: URL,
-        fps: Int = 1,
-        maxFrames: Int = 100,
-        progressHandler: ProgressHandler? = nil
-    ) async throws -> [ExtractedFrame] {
-        
+
+    private var generators: [URL: AVAssetImageGenerator] = [:]
+
+    /// 動画の長さを取得する
+    func videoInfo(for url: URL) async throws -> VideoInfo {
         let asset = AVURLAsset(url: url)
-        
-        // 動画のトラックを取得
-        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+
+        guard try await asset.loadTracks(withMediaType: .video).first != nil else {
             throw FrameExtractionError.noVideoTrack
         }
-        
-        // 動画の長さを取得
+
         let duration = try await asset.load(.duration)
-        let durationSeconds = CMTimeGetSeconds(duration)
-        
-        // フレームレートを取得
-        let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
-        
-        print("📹 動画情報:")
-        print("  - 長さ: \(durationSeconds) 秒")
-        print("  - FPS: \(nominalFrameRate)")
-        
-        // リーダーを作成
-        let reader = try AVAssetReader(asset: asset)
-        
-        // 出力設定
-        let outputSettings: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-        ]
-        
-        let output = AVAssetReaderTrackOutput(
-            track: videoTrack,
-            outputSettings: outputSettings
-        )
-        
-        reader.add(output)
-        reader.startReading()
-        defer { reader.cancelReading() }
-        
-        var frames: [ExtractedFrame] = []
-        var frameCount = 0
-        let frameInterval = max(1, Int(nominalFrameRate) / max(1, fps)) // 抽出間隔
-        
-        // フレームを抽出
-        while let sampleBuffer = output.copyNextSampleBuffer() {
-            try Task.checkCancellation()
-            
-            // フレーム間隔をチェック
-            if frameCount % frameInterval == 0 {
-                
-                if let cgImage = createCGImage(from: sampleBuffer) {
-                    let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                    frames.append(ExtractedFrame(image: cgImage, timestamp: CMTimeGetSeconds(time)))
-                    
-                    // 進捗を通知
-                    await progressHandler?(frames.count, maxFrames)
-                    
-                    print("🎬 フレーム抽出: \(frames.count)/\(maxFrames)")
-                    
-                    // 最大フレーム数に達したら終了
-                    if frames.count >= maxFrames {
-                        break
-                    }
-                }
-            }
-            
-            frameCount += 1
-        }
-        
-        print("✅ フレーム抽出完了: \(frames.count)フレーム")
-        
-        return frames
+        let seconds = max(0, CMTimeGetSeconds(duration))
+        // 0秒時点のフレームも含めるため +1
+        let totalFrames = max(1, Int(seconds.rounded(.down)) + 1)
+
+        return VideoInfo(duration: seconds, totalFrames: totalFrames)
     }
-    
-    /// 特定の時間のフレームを抽出
+
+    /// 指定秒のフレームを抽出する（並行に呼び出してよい）
     /// - Parameters:
     ///   - url: 動画のURL
-    ///   - time: 抽出する時間（秒）
-    /// - Returns: 抽出されたCGImage
-    func extractFrame(from url: URL, at time: Double) async throws -> CGImage {
-        let asset = AVURLAsset(url: url)
-        let imageGenerator = AVAssetImageGenerator(asset: asset)
-        imageGenerator.appliesPreferredTrackTransform = true
-        imageGenerator.requestedTimeToleranceAfter = .zero
-        imageGenerator.requestedTimeToleranceBefore = .zero
-        
+    ///   - time: 抽出する時刻（秒）
+    ///   - maximumDimension: 長辺の最大ピクセル数（同じ url への最初の呼び出しでのみ適用される）
+    func extractFrame(from url: URL, at time: Double, maximumDimension: CGFloat = 1280) async throws -> CGImage {
+        let generator = generator(for: url, maximumDimension: maximumDimension)
         let cmTime = CMTime(seconds: time, preferredTimescale: 600)
-        return try await imageGenerator.image(at: cmTime).image
+        return try await generator.image(at: cmTime).image
     }
-    
-    /// サンプルバッファからCGImageを作成
-    private func createCGImage(from sampleBuffer: CMSampleBuffer) -> CGImage? {
-        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return nil
+
+    private func generator(for url: URL, maximumDimension: CGFloat) -> AVAssetImageGenerator {
+        if let existing = generators[url] {
+            return existing
         }
-        
-        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext()
-        
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
-            return nil
-        }
-        
-        return cgImage
+
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        generator.maximumSize = CGSize(width: maximumDimension, height: maximumDimension)
+        generators[url] = generator
+        return generator
     }
 }
 
 /// フレーム抽出エラー
-enum FrameExtractionError: Error, LocalizedError {
+nonisolated enum FrameExtractionError: Error, LocalizedError {
     case noVideoTrack
-    case failedToCreateReader
-    case failedToCreateImage
-    
+
     var errorDescription: String? {
         switch self {
         case .noVideoTrack:
             return "動画トラックが見つかりません"
-        case .failedToCreateReader:
-            return "動画リーダーの作成に失敗しました"
-        case .failedToCreateImage:
-            return "画像の作成に失敗しました"
         }
     }
 }

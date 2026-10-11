@@ -36,13 +36,25 @@ nonisolated struct AnalysisMetrics {
     let densestMoment: (timestamp: Double, players: Int)?
     /// ボールの平均移動速度（画面幅/秒）
     let averageBallSpeed: Double?
-    
+    /// ユニフォーム色から判定したチーム（nil の場合は未判定）
+    let teams: [TeamInfo]?
+    /// チームごとの1フレームあたりの平均選手数（player のみ、team.id をキーにする）
+    let averagePlayersByTeam: [Int: Double]
+    /// チームごとに読み取れた背番号（重複なし、昇順。team.id をキーにする）
+    let jerseyNumbersByTeam: [Int: [Int]]
+
+    /// 保存済みの解析結果全体から指標を作る
     init(record: SavedAnalysis) {
-        let frames = record.frames
+        self.init(frames: record.frames, duration: record.coveredDuration, teams: record.teams)
+    }
+
+    /// 指定したフレーム群・時間幅から指標を作る（シーン単位の指標にも使う）
+    init(frames: [SavedFrame], duration: Double, teams: [TeamInfo]?) {
         frameCount = frames.count
-        coveredDuration = record.coveredDuration
-        ballDetectionRate = record.ballDetectionRate
-        
+        coveredDuration = duration
+        self.teams = teams
+        ballDetectionRate = frames.isEmpty ? 0 : Double(frames.filter { !$0.detections(of: .ball).isEmpty }.count) / Double(frames.count)
+
         func players(in frame: SavedFrame) -> [SavedDetection] {
             frame.detections(of: .player) + frame.detections(of: .goalkeeper)
         }
@@ -81,13 +93,51 @@ nonisolated struct AnalysisMetrics {
             speeds.append(Double(hypot(b.x - a.x, b.y - a.y)) / interval)
         }
         averageBallSpeed = speeds.isEmpty ? nil : speeds.reduce(0, +) / Double(speeds.count)
+
+        // チームごとの平均選手数・背番号（player のみ、フレームは1回だけ走査する）
+        var playersByTeam: [Int: Double] = [:]
+        var jerseyNumbers: [Int: Set<Int>] = [:]
+        if let teams, !teams.isEmpty {
+            var totalsByTeam: [Int: Int] = [:]
+            for team in teams {
+                totalsByTeam[team.id] = 0
+                jerseyNumbers[team.id] = []
+            }
+
+            for frame in frames {
+                for detection in frame.detections(of: .player) {
+                    guard let teamID = detection.team, totalsByTeam[teamID] != nil else { continue }
+                    totalsByTeam[teamID, default: 0] += 1
+                    if let number = detection.jerseyNumber {
+                        jerseyNumbers[teamID, default: []].insert(number)
+                    }
+                }
+            }
+
+            let frameCount = frames.isEmpty ? 1 : frames.count
+            for team in teams {
+                playersByTeam[team.id] = Double(totalsByTeam[team.id] ?? 0) / Double(frameCount)
+            }
+        }
+        averagePlayersByTeam = playersByTeam
+        jerseyNumbersByTeam = jerseyNumbers.mapValues { $0.sorted() }
     }
-    
+
     /// 指標を日本語のテキストにまとめる（LLM への入力用）
     var summaryText: String {
         var lines: [String] = []
         lines.append("- 解析フレーム数: \(frameCount)（\(String(format: "%.1f", coveredDuration)) 秒分）")
         lines.append("- 1フレームあたりの平均選手数: \(String(format: "%.1f", averagePlayers)) 人")
+        if let teams, !teams.isEmpty {
+            for team in teams {
+                let average = averagePlayersByTeam[team.id] ?? 0
+                var line = "- \(team.name)（\(ColorNaming.japaneseName(for: team.color))系ユニフォーム）の平均人数: \(String(format: "%.1f", average)) 人"
+                if let numbers = jerseyNumbersByTeam[team.id], !numbers.isEmpty {
+                    line += "、読み取れた背番号: \(numbers.map(String.init).joined(separator: ", "))"
+                }
+                lines.append(line)
+            }
+        }
         lines.append("- ボール検出率: \(Self.percent(ballDetectionRate))")
         if ballDetectionRate > 0 {
             lines.append("- ボール位置（画面の左/中央/右）: \(Self.zonesText(ballHorizontalZones))")
@@ -104,7 +154,7 @@ nonisolated struct AnalysisMetrics {
         lines.append("- 選手の左右の散らばり（標準偏差、画面幅比）: \(String(format: "%.2f", averagePlayerSpread))")
         return lines.joined(separator: "\n")
     }
-    
+
     // MARK: - Helpers
     
     /// 0〜1 の値を3分割した領域ごとの割合

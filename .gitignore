@@ -9,3 +9,6 @@ DerivedData/
 # YOLO モデル (scripts/setup_model.sh で生成)
 .model-build/
 learn-yolo-sports/MLModels/*.mlpackage
+
+# アーカイブ・エクスポート出力
+build/
