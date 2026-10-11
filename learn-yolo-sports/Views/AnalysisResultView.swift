@@ -68,6 +68,12 @@ struct AnalysisResultView: View {
 
                     commentarySection
                     playersSection
+                    // 選手を指定したときにだけ、その選手の指標とアドバイスを作る
+                    if let focusedPlayer {
+                        PlayerAdviceCard(record: record, player: focusedPlayer)
+                            .id(focusedPlayer.id)
+                            .padding(.horizontal)
+                    }
                     chapterListSection
                     overallAdviceSection
                         .id(Self.adviceSectionID)
@@ -326,7 +332,7 @@ struct AnalysisResultView: View {
                     playerChips(goalkeepers, color: .green)
                 }
 
-                Text("背番号が読めた選手は #番号、読めなかった選手は登場順に A, B, C… で呼んでいます。タップするとその選手にマーカーを付け続けます（もう一度タップで解除）。")
+                Text("背番号が読めた選手は #番号、読めなかった選手は登場順に A, B, C… で呼んでいます。タップするとその選手にマーカーを付け続け、動きへのアドバイスを作成します（もう一度タップで解除）。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
