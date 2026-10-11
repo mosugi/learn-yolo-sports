@@ -36,7 +36,7 @@ nonisolated struct PlayerTrackingResult {
                 updated.team = assignment?.team
                 updated.playerID = assignment?.playerID
                 if frameExcluded.contains(index) {
-                    updated.inCourt = false
+                    updated.offPitch = true
                 }
                 if detection.label == SportsClass.referee.rawValue, assignment?.team != nil {
                     updated = SavedDetection(
@@ -48,7 +48,9 @@ nonisolated struct PlayerTrackingResult {
                         team: updated.team,
                         trackID: updated.trackID,
                         playerID: updated.playerID,
-                        jerseyNumber: updated.jerseyNumber
+                        jerseyNumber: updated.jerseyNumber,
+                        offPitch: updated.offPitch,
+                        detectedLabel: detection.label
                     )
                 }
                 return updated
@@ -75,6 +77,19 @@ nonisolated enum PlayerTracker {
     static let colorConflictStrength = 0.3
     /// 色が食い違う観測を対応付けるときに足す距離（身長単位）
     static let colorConflictPenalty = 1.5
+    /// 追跡・識別の方式の版。変えたときは上げる（保存済みの検出結果から識別をやり直す目安になる）
+    static let version = 3
+
+    /// 前回の追跡・識別の結果を外してから、追跡・識別をやり直してフレームに書き込む
+    static func retrack(frames: inout [SavedFrame], aspectRatio: Double, playersPerTeam: Int) -> PlayerTrackingResult {
+        for index in frames.indices {
+            frames[index].detections = frames[index].detections.map { $0.clearingTracking() }
+        }
+        let result = analyze(frames: frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
+        result.apply(to: &frames)
+        return result
+    }
+
     /// 選手の枠に割り当てる最短の追跡の長さ（秒）。これより短い断片はチームの色だけで表示する
     static let minimumSlotDuration = 2.0
     /// 選手の枠の数（1チームの人数）の既定値

@@ -114,7 +114,9 @@ struct VideoAnalysisView: View {
 
                 PhotosPicker(
                     selection: $selectedVideoItem,
-                    matching: .videos
+                    matching: .videos,
+                    // 写真ライブラリの識別子（itemIdentifier）を受け取り、同じ動画を見分けるために使う
+                    photoLibrary: .shared()
                 ) {
                     Label("動画を選択", systemImage: "photo.on.rectangle")
                         .font(.headline)
@@ -342,6 +344,13 @@ struct VideoAnalysisView: View {
                 .font(.caption)
             }
 
+            if viewModel.isReusingDetections {
+                Label("前に解析した動画のため、保存済みの検出結果を使って解析し直しています", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             Text("他のタブへの移動やアプリを閉じても解析は続きます。中断しても続きから再開できます。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -358,6 +367,14 @@ struct VideoAnalysisView: View {
         guard let item = item else { return }
         viewModel.errorMessage = nil
 
+        // 同じ動画を解析したことがあれば、読み込みも検出も省いて前回の検出結果から解析し直す
+        let assetIdentifier = item.itemIdentifier
+        if let assetIdentifier,
+           let recordID = await viewModel.reusableRecordID(for: VideoFingerprint(assetIdentifier: assetIdentifier)) {
+            viewModel.reanalyze(recordID: recordID, fingerprint: VideoFingerprint(assetIdentifier: assetIdentifier))
+            return
+        }
+
         // 読み込み中にアプリを離れても止まらないよう、選んだ直後にバックグラウンド継続を申請する
         let importer = importer
         let session = viewModel.beginImportSession {
@@ -368,7 +385,19 @@ struct VideoAnalysisView: View {
             let movie = try await importer.load(item) { fraction in
                 session.update(fraction: fraction, subtitle: "動画を読み込み中 \(Int(fraction * 100))%")
             }
-            viewModel.startNewAnalysis(videoAt: movie.url, session: session)
+            let url = movie.url
+            let fingerprint = try? await Task.detached(priority: .userInitiated) {
+                try VideoFingerprint.make(fileAt: url, assetIdentifier: assetIdentifier)
+            }.value
+
+            // 写真ライブラリの識別子で見分けられなかった場合も、中身が同じなら前回の検出結果を使う
+            if let fingerprint, let recordID = await viewModel.reusableRecordID(for: fingerprint) {
+                try? FileManager.default.removeItem(at: url)
+                session.finish(success: true)
+                viewModel.reanalyze(recordID: recordID, fingerprint: fingerprint)
+                return
+            }
+            viewModel.startNewAnalysis(videoAt: url, fingerprint: fingerprint, session: session)
         } catch is CancellationError {
             // ユーザーが読み込みをキャンセルした
             session.finish(success: false)

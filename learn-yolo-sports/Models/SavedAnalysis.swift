@@ -26,10 +26,26 @@ nonisolated struct SavedDetection: Codable, Hashable {
     var playerID: Int? = nil
     /// このフレームで読み取れた背番号
     var jerseyNumber: Int? = nil
+    /// 追跡の結果、コート外の人（観客・控えなど）とみなした（選手の識別をやり直すと外す）
+    var offPitch: Bool? = nil
+    /// 追跡の結果ラベルを付け替えた場合の、検出したときのラベル（審判 → 選手など）
+    var detectedLabel: String? = nil
 
     /// 解析対象から外した検出（コート外）か
     var isExcluded: Bool {
-        inCourt == false
+        inCourt == false || offPitch == true
+    }
+
+    /// 追跡・識別の結果を外し、検出したときの状態に戻す（検出結果を使い回して識別をやり直すため）
+    func clearingTracking() -> SavedDetection {
+        SavedDetection(
+            label: detectedLabel ?? label,
+            confidence: confidence,
+            boundingBox: boundingBox,
+            jerseyPalette: jerseyPalette,
+            inCourt: inCourt,
+            jerseyNumber: jerseyNumber
+        )
     }
 
     /// バウンディングボックスの中心（正規化座標）
@@ -48,7 +64,7 @@ nonisolated struct SavedDetection: Codable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case label, confidence, boundingBox, jerseyPalette, inCourt, team, trackID, playerID, jerseyNumber
+        case label, confidence, boundingBox, jerseyPalette, inCourt, team, trackID, playerID, jerseyNumber, offPitch, detectedLabel
     }
 }
 
@@ -65,6 +81,8 @@ extension SavedDetection {
         trackID = try? container.decodeIfPresent(Int.self, forKey: .trackID)
         playerID = try? container.decodeIfPresent(Int.self, forKey: .playerID)
         jerseyNumber = try? container.decodeIfPresent(Int.self, forKey: .jerseyNumber)
+        offPitch = try? container.decodeIfPresent(Bool.self, forKey: .offPitch)
+        detectedLabel = try? container.decodeIfPresent(String.self, forKey: .detectedLabel)
     }
 }
 
@@ -139,6 +157,12 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     var playerAdvice: [PlayerAdvice]? = nil
     /// 選手の識別に使った1チームの人数（古い記録は nil）
     var playersPerTeam: Int? = nil
+    /// 同じ動画を選び直したときに見分けるための目印（古い記録は nil）
+    var fingerprint: VideoFingerprint? = nil
+    /// 検出の条件（モデル・間隔など）。同じなら検出結果を使い回せる
+    var detectionVersion: String? = nil
+    /// 選手の追跡・識別の方式。変わっていれば識別をやり直す
+    var trackingVersion: Int? = nil
 
     // MARK: - 集計
     
