@@ -724,7 +724,8 @@ final class VideoAnalysisViewModel {
         var canContinue = true
         if record.advice == nil {
             canContinue = await generate {
-                record.advice = try await IntelligenceAdvisor.overallAdvice(for: record)
+                let advice = try await IntelligenceAdvisor.overallAdvice(for: record)
+                record.advice = advice
             }
             save()
         }
@@ -738,13 +739,16 @@ final class VideoAnalysisViewModel {
                 teams: record.teams,
                 players: record.players
             )
+            let teams = record.teams
+            let usedRealModel = record.usedRealModel
             canContinue = await generate {
-                record.segments?[index].commentary = try await IntelligenceAdvisor.sceneCommentary(
+                let commentary = try await IntelligenceAdvisor.sceneCommentary(
                     for: segment,
                     metrics: metrics,
-                    teams: record.teams,
-                    usedRealModel: record.usedRealModel
+                    teams: teams,
+                    usedRealModel: usedRealModel
                 )
+                record.segments?[index].commentary = commentary
             }
             save()
         }
