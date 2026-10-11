@@ -15,31 +15,24 @@ import SwiftUI
 /// 毎回同じ画像になるよう、乱数は固定シードで生成する。
 nonisolated enum DemoData {
     
-    struct Content {
-        let record: SavedAnalysis
-        let frames: [FrameDetectionResult]
-        
-        var images: [Int: CGImage] {
-            Dictionary(uniqueKeysWithValues: frames.compactMap { frame in
-                frame.image.map { (frame.frameNumber, $0) }
-            })
-        }
-    }
-    
     static let videoName = "demo_match.mp4"
+    /// デモの解析結果の ID（保存先のディレクトリ名にもなる）
+    static let id = UUID(uuidString: "D3A0D3A0-0000-4000-8000-000000000001")!
     
     private static let size = CGSize(width: 1280, height: 720)
     private static let frameCount = 12
     private static let framesPerSecond = 2
     
-    static func make() -> Content {
+    /// デモの解析結果を作り、フレーム画像を directory に書き出す
+    static func make(directory: URL) -> SavedAnalysis {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var random = SeededRandom(seed: 20261009)
         
         // 各選手の基準位置（正規化座標）。左が青チーム、右が白チーム
         let blueBase: [CGPoint] = [CGPoint(x: 0.22, y: 0.30), CGPoint(x: 0.20, y: 0.68), CGPoint(x: 0.33, y: 0.48), CGPoint(x: 0.42, y: 0.26), CGPoint(x: 0.45, y: 0.70), CGPoint(x: 0.55, y: 0.42), CGPoint(x: 0.60, y: 0.60)]
         let whiteBase: [CGPoint] = [CGPoint(x: 0.50, y: 0.33), CGPoint(x: 0.52, y: 0.55), CGPoint(x: 0.63, y: 0.30), CGPoint(x: 0.66, y: 0.72), CGPoint(x: 0.74, y: 0.46), CGPoint(x: 0.80, y: 0.30), CGPoint(x: 0.78, y: 0.64)]
         
-        var frames: [FrameDetectionResult] = []
+        var frames: [SavedFrame] = []
         for index in 0..<frameCount {
             let t = Double(index) / Double(frameCount - 1)
             // ボールは中盤から右サイドへ運ばれる
@@ -59,31 +52,48 @@ nonisolated enum DemoData {
             figures.append(Figure(kind: .referee, center: CGPoint(x: ball.x - 0.08, y: 0.62)))
             figures.append(Figure(kind: .ball, center: ball))
             
-            let image = render(figures)
-            let detections = figures.map { figure in
-                Detection(
+            var imageFileName: String?
+            if let image = render(figures) {
+                let fileName = AnalysisStore.imageFileName(for: index)
+                if (try? FrameImageIO.writeJPEG(image, to: directory.appending(path: fileName))) != nil {
+                    imageFileName = fileName
+                }
+            }
+            // 図形の並びは毎フレーム同じなので、並び順を追跡 ID として使う
+            let detections = figures.enumerated().map { trackID, figure in
+                let box = figure.boundingBox(in: size)
+                return SavedDetection(
                     label: figure.kind.label,
                     confidence: Float(random.next(in: 0.72...0.96)),
-                    boundingBox: figure.boundingBox(in: size),
-                    color: SportsClass(rawValue: figure.kind.label)?.color ?? .gray
+                    boundingBox: CGRect(
+                        x: box.minX / size.width,
+                        y: box.minY / size.height,
+                        width: box.width / size.width,
+                        height: box.height / size.height
+                    ),
+                    team: figure.kind.team,
+                    trackID: figure.kind == .ball ? nil : trackID
                 )
             }
             
-            frames.append(FrameDetectionResult(
+            frames.append(SavedFrame(
                 frameNumber: index,
                 timestamp: Double(index) / Double(framesPerSecond),
-                detections: detections,
-                image: image
+                imageFileName: imageFileName,
+                detections: detections
             ))
         }
         
         var record = SavedAnalysis(
+            id: id,
             createdAt: Date(timeIntervalSince1970: 1_791_500_000),
             videoName: videoName,
             framesPerSecond: framesPerSecond,
+            imageWidth: Int(size.width),
+            imageHeight: Int(size.height),
             processingDuration: 6.8,
             usedRealModel: true,
-            results: frames
+            frames: frames
         )
         record.advice = AnalysisAdvice(
             summary: "ボールは中盤から右サイドへ運ばれており、攻撃側が相手陣内へ押し込んでいる時間帯と読み取れます。ボール周辺には両チームの選手が集まり、局所的な密集が生じています。",
@@ -100,7 +110,7 @@ nonisolated enum DemoData {
             generatedAt: record.createdAt
         )
         
-        return Content(record: record, frames: frames)
+        return record
     }
     
     // MARK: - Drawing
@@ -115,6 +125,14 @@ nonisolated enum DemoData {
                 case .goalkeeper: return SportsClass.goalkeeper.rawValue
                 case .referee: return SportsClass.referee.rawValue
                 case .ball: return SportsClass.ball.rawValue
+                }
+            }
+            
+            var team: TeamSide? {
+                switch self {
+                case .bluePlayer: return .own
+                case .whitePlayer, .goalkeeper: return .opponent
+                case .referee, .ball: return nil
                 }
             }
         }

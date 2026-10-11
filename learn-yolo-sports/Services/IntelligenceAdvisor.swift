@@ -11,14 +11,17 @@ import FoundationModels
 /// オンデバイス LLM に生成させるアドバイスの構造
 @Generable
 nonisolated struct GeneratedAdvice {
-    @Guide(description: "この時間帯の試合状況の総評。2〜3文の日本語")
+    @Guide(description: "この時間帯の自チームの戦い方の総評。コーチが選手に語りかける口調で2〜3文の日本語")
     var summary: String
     
-    @Guide(description: "指標から読み取れる観察ポイント。根拠となる数値に触れた短い日本語の文", .count(3))
+    @Guide(description: "判定された場面についての解説。時刻と根拠の数値に触れた短い日本語の文", .count(3))
     var observations: [String]
     
-    @Guide(description: "チームや選手への具体的な改善提案。短い日本語の文", .count(3))
+    @Guide(description: "次の練習や試合で取り組むこと。具体的な行動を示す短い日本語の文", .count(3))
     var suggestions: [String]
+    
+    @Guide(description: "背番号を挙げた選手ごとの短いアドバイス。「#10: 〜」の形式の日本語。選手の情報がなければ空", .maximumCount(5))
+    var playerAdvice: [String]
 }
 
 /// Apple Intelligence（Foundation Models）を使って解析結果へのアドバイスを生成する
@@ -39,9 +42,10 @@ final class IntelligenceAdvisor {
     private var generationTask: Task<Void, Never>?
     
     private static let instructions = """
-        あなたはサッカーの戦術コーチです。
-        試合動画を物体検出して得た指標をもとに、選手とチームに向けたアドバイスを日本語で返してください。
-        検出にはチームの区別がなく、見逃しや誤検出も含まれます。数値から言えることだけを述べ、断定しすぎないでください。
+        あなたは育成年代も指導するサッカーのコーチです。
+        試合動画の解析で判定済みの場面と集計をもとに、自チームの選手に向けた解説を日本語で返してください。
+        場面の良し悪しの判定はすでに行われています。与えられた判定と数値だけを使い、新しい数値や場面を作らないでください。
+        検出には見逃しや誤検出が含まれるため、断定しすぎず、前向きで具体的な言葉を選んでください。
         """
     
     /// 端末で Apple Intelligence を利用できない場合の理由（利用できる場合は nil）
@@ -89,7 +93,8 @@ final class IntelligenceAdvisor {
                     summary: partial?.summary ?? "",
                     observations: partial?.observations ?? [],
                     suggestions: partial?.suggestions ?? [],
-                    generatedAt: Date()
+                    generatedAt: Date(),
+                    playerAdvice: partial?.playerAdvice ?? []
                 )
                 state = .idle
                 onComplete(advice)
@@ -113,6 +118,33 @@ final class IntelligenceAdvisor {
     
     private static func prompt(for record: SavedAnalysis) -> String {
         var lines: [String] = []
+        if let report = record.coachReport, let setup = record.setup {
+            lines.append("以下はサッカーの試合動画（\(setup.format.displayName)）を解析し、規則に基づいて判定した結果です。")
+            if !record.usedRealModel {
+                lines.append("（注意: これはテスト用のランダムな検出結果です）")
+            }
+            lines.append("")
+            lines.append(report.promptText)
+            let chapters = record.chapterList
+            if !chapters.isEmpty {
+                lines.append("")
+                lines.append("## 得点シーン")
+                lines.append(contentsOf: chapters.map { "- \(CoachReport.time($0.eventTime)) \($0.title(setup: setup))" })
+            }
+            // オンデバイス LLM は入力が短いため、選手は追跡できた時間の長い順に絞る
+            let players = PlayerAnalyzer.reports(for: record)
+                .sorted { $0.observedTime > $1.observedTime }
+                .prefix(6)
+            if !players.isEmpty {
+                lines.append("")
+                lines.append("## 選手別（背番号）")
+                lines.append(contentsOf: players.map { "- \($0.summaryLine)" })
+            }
+            lines.append("")
+            lines.append("この結果から、総評、場面ごとの解説、次に取り組むこと、背番号ごとの選手へのアドバイスを作成してください。")
+            return lines.joined(separator: "\n")
+        }
+        
         lines.append("以下はサッカー動画の物体検出から算出した指標です。")
         if !record.usedRealModel {
             lines.append("（注意: これはテスト用のランダムな検出結果です）")

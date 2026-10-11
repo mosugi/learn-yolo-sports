@@ -26,13 +26,13 @@ struct learn_yolo_sportsApp: App {
         try? FileManager.default.removeItem(at: directory)
         let store = AnalysisStore(baseURL: directory)
         let viewModel = VideoAnalysisViewModel(store: store)
-        let demo = DemoData.make()
-        viewModel.showDemo(record: demo.record, frames: demo.frames)
+        let record = DemoData.make(directory: store.directoryURL(for: DemoData.id))
+        viewModel.showDemo(record: record)
         _store = State(initialValue: store)
         _analysisViewModel = State(initialValue: viewModel)
         
         Task {
-            try? await store.save(demo.record, images: demo.images)
+            try? await store.save(record)
         }
     }
     

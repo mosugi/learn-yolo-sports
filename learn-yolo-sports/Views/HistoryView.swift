@@ -67,6 +67,9 @@ private struct HistoryRow: View {
             HStack(spacing: 12) {
                 Label("\(record.frames.count) フレーム", systemImage: "photo.stack")
                 Label("\(record.totalDetections) 検出", systemImage: "scope")
+                if let report = record.coachReport {
+                    Label("解説 \(report.scenes.count) 場面", systemImage: "sportscourt")
+                }
                 if !record.usedRealModel {
                     Label("モック", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
@@ -81,24 +84,12 @@ private struct HistoryRow: View {
 
 /// 保存済みの解析結果の詳細
 struct HistoryDetailView: View {
-    @Environment(AnalysisStore.self) private var store
     let record: SavedAnalysis
     
-    @State private var frames: [FrameDetectionResult]?
-    
     var body: some View {
-        Group {
-            if let frames {
-                AnalysisResultView(record: record, frames: frames)
-            } else {
-                ProgressView("読み込み中...")
-            }
-        }
-        .navigationTitle(record.videoName)
-        .navigationBarTitleDisplayMode(.inline)
-        .task(id: record.id) {
-            frames = await store.loadFrames(for: record)
-        }
+        AnalysisResultView(record: record)
+            .navigationTitle(record.videoName)
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 

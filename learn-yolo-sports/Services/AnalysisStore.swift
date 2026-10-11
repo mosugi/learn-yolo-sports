@@ -37,7 +37,8 @@ final class AnalysisStore {
         String(format: "frame_%04d.jpg", frameNumber)
     }
     
-    private func directoryURL(for id: UUID) -> URL {
+    /// 解析結果のディレクトリ（解析中のフレーム画像もここに書き込む）
+    func directoryURL(for id: UUID) -> URL {
         baseURL.appending(path: id.uuidString, directoryHint: .isDirectory)
     }
     
@@ -73,44 +74,21 @@ final class AnalysisStore {
             .sorted { $0.createdAt > $1.createdAt }
     }
     
-    /// フレーム画像を読み込み、表示用の検出結果に復元する
-    func loadFrames(for record: SavedAnalysis) async -> [FrameDetectionResult] {
-        let directory = directoryURL(for: record.id)
+    /// フレーム画像を読み込む
+    func image(for frame: SavedFrame, in record: SavedAnalysis) async -> CGImage? {
+        guard let fileName = frame.imageFileName else { return nil }
+        let url = directoryURL(for: record.id).appending(path: fileName)
         return await Task.detached(priority: .userInitiated) {
-            record.frames.map { frame in
-                let image = frame.imageFileName.flatMap {
-                    FrameImageIO.readImage(at: directory.appending(path: $0))
-                }
-                let width = CGFloat(image?.width ?? record.imageWidth)
-                let height = CGFloat(image?.height ?? record.imageHeight)
-                
-                return FrameDetectionResult(
-                    frameNumber: frame.frameNumber,
-                    timestamp: frame.timestamp,
-                    detections: frame.detections.map { detection in
-                        let box = detection.boundingBox
-                        return Detection(
-                            label: detection.label,
-                            confidence: detection.confidence,
-                            boundingBox: CGRect(
-                                x: box.minX * width,
-                                y: box.minY * height,
-                                width: box.width * width,
-                                height: box.height * height
-                            ),
-                            color: SportsClass(rawValue: detection.label)?.color ?? .gray
-                        )
-                    },
-                    image: image
-                )
-            }
+            FrameImageIO.readImage(at: url)
         }.value
     }
     
     // MARK: - Write
     
     /// 解析結果を保存する（一覧にはすぐに反映し、ファイル書き込みはバックグラウンドで行う）
-    func save(_ record: SavedAnalysis, images: [Int: CGImage]) async throws {
+    ///
+    /// フレーム画像は解析中に directoryURL(for:) へ書き込み済みであること。
+    func save(_ record: SavedAnalysis) async throws {
         records.insert(record, at: 0)
         
         let directory = directoryURL(for: record.id)
@@ -118,10 +96,6 @@ final class AnalysisStore {
         
         let task = Task.detached(priority: .utility) {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            for frame in record.frames {
-                guard let fileName = frame.imageFileName, let image = images[frame.frameNumber] else { continue }
-                try FrameImageIO.writeJPEG(image, to: directory.appending(path: fileName))
-            }
             // JSON は最後に書く（JSON があれば画像も揃っている）
             try data.write(to: directory.appending(path: "analysis.json"), options: .atomic)
         }
@@ -129,6 +103,14 @@ final class AnalysisStore {
         defer { pendingSaves[record.id] = nil }
         
         try await task.value
+    }
+    
+    /// 保存に至らなかった解析の書きかけのファイルを消す
+    func discardPartial(id: UUID) {
+        let directory = directoryURL(for: id)
+        Task.detached(priority: .utility) {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
     
     /// 保存済みの解析結果を更新する
@@ -139,7 +121,14 @@ final class AnalysisStore {
         try data.write(to: jsonURL(for: record), options: .atomic)
     }
     
-    /// 解析結果を削除する
+    /// 保存済みの解析結果の一部を書き換えて保存する
+    func modify(_ id: UUID, _ change: (inout SavedAnalysis) -> Void) throws {
+        guard var record = record(for: id) else { return }
+        change(&record)
+        try update(record)
+    }
+    
+        /// 解析結果を削除する
     func delete(_ record: SavedAnalysis) {
         records.removeAll { $0.id == record.id }
         
@@ -201,7 +190,8 @@ nonisolated enum FrameImageIO {
         return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
     
-    private static func downscaled(_ image: CGImage, maxDimension: Int) -> CGImage? {
+    /// 長辺を maxDimension 以下に縮小する（縮小不要なら nil）
+    static func downscaled(_ image: CGImage, maxDimension: Int) -> CGImage? {
         let longSide = max(image.width, image.height)
         guard longSide > maxDimension else { return nil }
         

@@ -12,53 +12,44 @@ import AVFoundation
 /// 解析の進行段階
 enum AnalysisPhase {
     case idle
-    case extracting
     case detecting
-    case saving
+    case analyzing
 
     var label: String {
         switch self {
         case .idle: return "待機中"
-        case .extracting: return "フレーム抽出"
         case .detecting: return "物体検出"
-        case .saving: return "保存"
+        case .analyzing: return "戦術分析"
         }
     }
 }
 
-/// 直近の解析で計測したフレームあたりの処理時間（次回の進捗配分と所要時間の見積もりに使う）
+/// 解析する区間と抽出レート
+struct AnalysisSettings: Equatable {
+    /// 1秒あたりに検出するフレーム数
+    var framesPerSecond = 5
+    /// 解析を始める時刻（秒）
+    var startTime = 0.0
+    /// 解析する長さ（秒）
+    var duration = 60.0
+}
+
+/// 直近の解析で計測した 1 フレームあたりの処理時間（次回の所要時間の見積もりに使う）
 ///
 /// 実モデルとモックモードでは検出速度が大きく異なるため、別々に保存する。
-nonisolated struct ProcessingRates {
-    /// フレーム抽出にかかった時間（抽出 1 フレームあたり・秒）
-    var extraction: Double
-    /// 物体検出にかかった時間（1 フレームあたり・秒）
-    var detection: Double
-
+nonisolated enum ProcessingRate {
     private static func key(usesRealModel: Bool) -> String {
-        usesRealModel ? "processingRates.real" : "processingRates.mock"
+        usesRealModel ? "processingRate.real" : "processingRate.mock"
     }
 
-    static func load(usesRealModel: Bool) -> ProcessingRates? {
-        guard let values = UserDefaults.standard.array(forKey: key(usesRealModel: usesRealModel)) as? [Double],
-              values.count == 2, values.allSatisfy({ $0 > 0 }) else {
-            return nil
-        }
-        return ProcessingRates(extraction: values[0], detection: values[1])
+    /// 1 フレームあたりの処理時間（秒）。未計測なら nil
+    static func load(usesRealModel: Bool) -> Double? {
+        let value = UserDefaults.standard.double(forKey: key(usesRealModel: usesRealModel))
+        return value > 0 ? value : nil
     }
 
-    func save(usesRealModel: Bool) {
-        UserDefaults.standard.set([extraction, detection], forKey: Self.key(usesRealModel: usesRealModel))
-    }
-
-    /// 進捗バー全体のうちフレーム抽出が占める割合
-    var extractionWeight: Double {
-        min(0.9, max(0.1, extraction / (extraction + detection)))
-    }
-
-    /// 指定フレーム数の解析にかかる時間の目安
-    func estimatedDuration(frames: Int) -> TimeInterval {
-        (extraction + detection) * Double(frames)
+    static func save(_ secondsPerFrame: Double, usesRealModel: Bool) {
+        UserDefaults.standard.set(secondsPerFrame, forKey: key(usesRealModel: usesRealModel))
     }
 }
 
@@ -72,15 +63,21 @@ class VideoAnalysisViewModel {
 
     // MARK: - State
 
-    var videoURL: URL?
+    private(set) var videoURL: URL?
+    /// 動画の長さ（秒）
+    private(set) var videoDuration: Double?
+    var settings = AnalysisSettings()
+    /// コート・チームの設定
+    private(set) var setup: AnalysisSetup?
+    /// コート設定に使った画像（カメラが動いたかの判定の基準にもする）
+    private(set) var setupImage: CGImage?
+
     var isAnalyzing = false
     var phase: AnalysisPhase = .idle
     var analysisProgress: Double = 0.0
     var currentFrame: Int = 0
     var totalFrames: Int = 0
     var errorMessage: String?
-
-    var detectionResults: [FrameDetectionResult] = []
 
     /// 直近の解析結果の保存 ID（AnalysisStore から参照する）
     var currentRecordID: UUID?
@@ -92,25 +89,29 @@ class VideoAnalysisViewModel {
     var isUsingRealModel: Bool?
 
     /// 解析の開始時刻
-    var analysisStartDate: Date?
+    private(set) var analysisStartDate: Date?
 
     /// 解析完了の見込み時刻（見積もれない間は nil）
-    var estimatedCompletionDate: Date?
+    private(set) var estimatedCompletionDate: Date?
 
     // MARK: - Computed Properties
 
     var hasResults: Bool {
-        !detectionResults.isEmpty
+        currentRecordID != nil
     }
 
     /// 進捗の短い説明（例: 物体検出 12/30・残り約45秒）
     var progressDescription: String {
-        if phase == .saving {
-            return "結果を保存中"
-        }
+        guard phase == .detecting else { return phase.label }
         let base = "\(phase.label) \(currentFrame)/\(totalFrames)"
         guard let remaining = estimatedRemaining(now: Date()) else { return base }
         return base + "・残り" + DurationText.approximate(remaining)
+    }
+
+    /// 現在の設定で処理するフレーム数
+    var expectedFrameCount: Int {
+        let duration = min(settings.duration, max(0, (videoDuration ?? settings.startTime + settings.duration) - settings.startTime))
+        return max(1, Int((duration * Double(settings.framesPerSecond)).rounded(.up)))
     }
 
     /// 残り時間（見積もれない間は nil）
@@ -119,12 +120,10 @@ class VideoAnalysisViewModel {
     }
 
     /// 解析を始める前の所要時間の目安（前回の計測値がない場合は nil）
-    func estimatedDuration(for info: VideoInfo, framesPerSecond: Int, maxFrames: Int) -> TimeInterval? {
+    var estimatedDuration: TimeInterval? {
         guard let isUsingRealModel,
-              let rates = ProcessingRates.load(usesRealModel: isUsingRealModel) else {
-            return nil
-        }
-        return rates.estimatedDuration(frames: info.expectedFrameCount(fps: framesPerSecond, maxFrames: maxFrames))
+              let rate = ProcessingRate.load(usesRealModel: isUsingRealModel) else { return nil }
+        return rate * Double(expectedFrameCount)
     }
 
     // MARK: - Dependencies
@@ -135,13 +134,8 @@ class VideoAnalysisViewModel {
 
     private var analysisTask: Task<Void, Never>?
     private var backgroundSession: ContinuedProcessingSession?
-
-    /// 現在のフェーズの開始時刻（フレームあたりの処理時間の計測に使う）
-    private var phaseStartDate = Date()
-    /// 進捗バー全体のうちフレーム抽出が占める割合
-    private var extractionWeight = 0.5
-    /// 前回の解析で計測した処理時間
-    private var previousRates: ProcessingRates?
+    /// 前回の解析で計測した 1 フレームあたりの処理時間
+    private var previousRate: Double?
 
     init(store: AnalysisStore) {
         self.store = store
@@ -154,36 +148,80 @@ class VideoAnalysisViewModel {
         isUsingRealModel = await detector.isModelLoaded
     }
 
+    /// 解析する動画を選ぶ（コート設定は動画ごとにやり直す）
+    func selectVideo(_ url: URL) async {
+        reset()
+        videoURL = url
+        do {
+            let duration = try await frameExtractor.duration(of: url)
+            videoDuration = duration
+            settings.startTime = 0
+            settings.duration = min(60, max(1, duration.rounded(.down)))
+        } catch {
+            errorMessage = "動画の長さを取得できませんでした: \(error.localizedDescription)"
+        }
+    }
+
+    /// コート設定に使うフレーム（解析の開始時刻）
+    func loadSetupFrame() async -> CGImage? {
+        guard let videoURL else { return nil }
+        do {
+            return try await frameExtractor.frame(from: videoURL, at: settings.startTime)
+        } catch {
+            errorMessage = "フレームを取得できませんでした: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func applySetup(_ setup: AnalysisSetup, image: CGImage) {
+        self.setup = setup
+        self.setupImage = image
+    }
+
+    func clearSetup() {
+        setup = nil
+        setupImage = nil
+    }
+
     /// 解析を開始（View から切り離した Task で実行する）
-    func startAnalysis(url: URL, framesPerSecond: Int = 1, maxFrames: Int = 30) {
-        guard !isAnalyzing else { return }
+    func startAnalysis() {
+        guard !isAnalyzing, let url = videoURL else { return }
 
         isAnalyzing = true
+        let settings = settings
+        let setup = setup
+        let setupImage = setupImage
         analysisTask = Task {
-            await analyzeVideo(url: url, framesPerSecond: framesPerSecond, maxFrames: maxFrames)
+            await analyzeVideo(url: url, settings: settings, setup: setup, setupImage: setupImage)
         }
     }
 
     /// 動画を解析
-    private func analyzeVideo(url: URL, framesPerSecond: Int, maxFrames: Int) async {
+    private func analyzeVideo(url: URL, settings: AnalysisSettings, setup: AnalysisSetup?, setupImage: CGImage?) async {
         isAnalyzing = true
-        phase = .extracting
+        phase = .detecting
         hasUnseenResult = false
         analysisProgress = 0.0
         currentFrame = 0
-        totalFrames = 0
         errorMessage = nil
-        detectionResults = []
         currentRecordID = nil
-        videoURL = url
 
+        let duration = min(settings.duration, max(0, (videoDuration ?? settings.startTime + settings.duration) - settings.startTime))
+        totalFrames = expectedFrameCount
         let usesRealModel = isUsingRealModel ?? false
-        previousRates = ProcessingRates.load(usesRealModel: usesRealModel)
-        extractionWeight = previousRates?.extractionWeight ?? 0.5
-        let startTime = Date()
-        analysisStartDate = startTime
-        phaseStartDate = startTime
-        estimatedCompletionDate = nil
+        previousRate = ProcessingRate.load(usesRealModel: usesRealModel)
+        analysisStartDate = Date()
+        estimatedCompletionDate = previousRate.map { Date().addingTimeInterval($0 * Double(totalFrames)) }
+
+        let recordID = UUID()
+        let processor = KeyframeProcessor(
+            detector: detector,
+            setup: setup,
+            referenceImage: setupImage,
+            outputDirectory: store.directoryURL(for: recordID),
+            // 画像は 1 秒に 2 枚程度、長い区間では合計 600 枚程度までに抑える
+            imageInterval: max(max(1, settings.framesPerSecond / 2), totalFrames / 600)
+        )
 
         let session = ContinuedProcessingSession { [weak self] in
             self?.cancelAnalysis()
@@ -192,113 +230,102 @@ class VideoAnalysisViewModel {
         backgroundSession = session
 
         do {
-            print("🎬 動画解析開始: \(url.lastPathComponent)")
+            print("🎬 動画解析開始: \(url.lastPathComponent)（\(settings.startTime)秒から \(duration)秒、\(settings.framesPerSecond) FPS）")
+            let startTime = Date()
 
-            // フレームを抽出
-            print("📹 フレームを抽出中...")
-            let frames = try await frameExtractor.extractFrames(
+            // フレームを1枚ずつ取り出して、その場で検出する
+            try await frameExtractor.forEachFrame(
                 from: url,
-                fps: framesPerSecond,
-                maxFrames: maxFrames
-            ) { current, total in
-                await self.updateExtractionProgress(current: current, total: total)
+                startTime: settings.startTime,
+                duration: duration,
+                fps: settings.framesPerSecond
+            ) { frame, index in
+                _ = try await processor.process(frame, index: index)
+                await self.updateDetectionProgress(current: index + 1)
             }
 
-            totalFrames = frames.count
-            print("✅ フレーム抽出完了: \(frames.count)フレーム")
-
-            guard !frames.isEmpty else {
-                throw FrameExtractionError.noFrames
-            }
-
-            let extractionDuration = Date().timeIntervalSince(phaseStartDate)
-
-            // 各フレームで物体検出
-            print("🤖 物体検出中...")
-            var results: [FrameDetectionResult] = []
-            phase = .detecting
-            phaseStartDate = Date()
-            currentFrame = 0
-            analysisProgress = extractionWeight
-            updateEstimate()
-
-            for (index, frame) in frames.enumerated() {
-                try Task.checkCancellation()
-
-                let detections = try await detector.detect(image: frame.image)
-
-                let result = FrameDetectionResult(
-                    frameNumber: index,
-                    timestamp: frame.timestamp,
-                    detections: detections,
-                    image: frame.image
-                )
-
-                results.append(result)
-
-                currentFrame = index + 1
-                analysisProgress = extractionWeight + Double(index + 1) / Double(frames.count) * (1 - extractionWeight)
-                updateEstimate()
-                session.update(fraction: analysisProgress, subtitle: progressDescription)
-
-                print("🎯 フレーム \(index + 1)/\(frames.count): \(detections.count)個検出")
-            }
-
-            // 最後のフレームの検出中にキャンセルされた場合は保存しない
+            // 最後のフレームの処理中にキャンセルされた場合は保存しない
             try Task.checkCancellation()
-            
-            let detectionDuration = Date().timeIntervalSince(phaseStartDate)
-            let duration = Date().timeIntervalSince(startTime)
 
-            // 次回の見積もりのために、フレームあたりの処理時間を記録する
-            let frameCount = Double(frames.count)
-            ProcessingRates(
-                extraction: max(0.001, extractionDuration / frameCount),
-                detection: max(0.001, detectionDuration / frameCount)
-            ).save(usesRealModel: usesRealModel)
+            let frames = await processor.results
+            guard !frames.isEmpty else {
+                throw AnalysisError.noFrames
+            }
+            // 次回の見積もりのために、1 フレームあたりの処理時間を記録する
+            ProcessingRate.save(
+                max(0.001, Date().timeIntervalSince(startTime) / Double(frames.count)),
+                usesRealModel: usesRealModel
+            )
+            let imageSize = await processor.imageSize ?? .zero
+
+            // チーム分類・追跡・局面判定・解説の選定
+            phase = .analyzing
+            estimatedCompletionDate = nil
+            analysisProgress = 0.97
+            session.update(fraction: analysisProgress, subtitle: "戦術分析")
+
+            let fps = settings.framesPerSecond
+            let analysis = await Task.detached(priority: .userInitiated) { () -> (result: MatchAnalysisResult, report: CoachReport, chapters: [MatchChapter])? in
+                guard let setup else { return nil }
+                let result = MatchAnalyzer.analyze(frames: frames, setup: setup)
+                let report = CoachRules.report(analysis: result, setup: setup, framesPerSecond: fps)
+                let chapters = GoalDetector.chapters(
+                    states: result.states,
+                    changes: result.possessionChanges,
+                    setup: setup,
+                    trackNumbers: result.trackNumbers
+                )
+                return (result, report, chapters)
+            }.value
+            let states = analysis?.result.statesByFrameIndex ?? [:]
+
+            try Task.checkCancellation()
 
             let record = SavedAnalysis(
+                id: recordID,
+                createdAt: Date(),
                 videoName: url.lastPathComponent,
-                framesPerSecond: framesPerSecond,
-                processingDuration: duration,
+                framesPerSecond: fps,
+                imageWidth: Int(imageSize.width),
+                imageHeight: Int(imageSize.height),
+                processingDuration: Date().timeIntervalSince(startTime),
                 usedRealModel: isUsingRealModel ?? false,
-                results: results
+                frames: frames.map {
+                    SavedFrame(processed: $0, assignments: analysis?.result.assignments[$0.index], state: states[$0.index])
+                },
+                setup: setup,
+                coachReport: analysis?.report,
+                chapters: analysis?.chapters,
+                trackNumbers: analysis?.result.trackNumbers
             )
 
-            print("✅ 解析完了!")
-            print("  - 処理時間: \(String(format: "%.2f", duration))秒")
-            print("  - 総検出数: \(record.totalDetections)")
-            print("  - 平均検出数: \(String(format: "%.2f", record.averageDetectionsPerFrame))")
+            print("✅ 解析完了: \(frames.count)フレーム、\(String(format: "%.1f", record.processingDuration))秒")
+            if let analysis {
+                print("📋 解説する場面: \(analysis.report.scenes.count)件、得点シーン: \(analysis.chapters.count)件、背番号を特定した追跡: \(analysis.result.trackNumbers.count)件")
+            }
 
-            // 解析結果を保存（JPEG の書き出しに時間がかかるため段階を表示する）
-            phase = .saving
-            estimatedCompletionDate = nil
-            session.update(fraction: analysisProgress, subtitle: progressDescription)
-            let images = Dictionary(uniqueKeysWithValues: results.compactMap { result in
-                result.image.map { (result.frameNumber, $0) }
-            })
             do {
-                try await store.save(record, images: images)
+                try await store.save(record)
+                currentRecordID = record.id
                 print("💾 解析結果を保存しました: \(record.id)")
             } catch {
                 errorMessage = "解析結果の保存に失敗しました: \(error.localizedDescription)"
                 print("❌ 保存エラー: \(error)")
             }
 
-            // 保存が終わってから結果画面に切り替える（保存中は進捗カードを表示し続ける）
-            detectionResults = results
-            currentRecordID = record.id
-
+            analysisProgress = 1.0
             hasUnseenResult = true
             session.finish(success: true)
 
         } catch is CancellationError {
             print("⏹️ 解析をキャンセルしました")
+            store.discardPartial(id: recordID)
             analysisProgress = 0.0
             currentFrame = 0
             session.finish(success: false)
 
         } catch {
+            store.discardPartial(id: recordID)
             errorMessage = "エラー: \(error.localizedDescription)"
             print("❌ エラー: \(error)")
             session.finish(success: false)
@@ -312,55 +339,32 @@ class VideoAnalysisViewModel {
         backgroundSession = nil
     }
 
-    /// フレーム抽出の進捗を反映（全体の 0%〜extractionWeight）
-    private func updateExtractionProgress(current: Int, total: Int) {
-        guard isAnalyzing, phase == .extracting else { return }
+    /// 検出の進捗を反映（全体の 0%〜95%）
+    private func updateDetectionProgress(current: Int) {
+        guard isAnalyzing, phase == .detecting else { return }
         currentFrame = current
-        totalFrames = total
-        analysisProgress = Double(current) / Double(total) * extractionWeight
+        totalFrames = max(totalFrames, current)
+        analysisProgress = Double(current) / Double(totalFrames) * 0.95
         updateEstimate()
         backgroundSession?.update(fraction: analysisProgress, subtitle: progressDescription)
     }
 
-    /// 現在のフェーズの実測ペースと前回の計測値から、完了見込み時刻を更新する
+    /// 実測のペースから完了見込み時刻を更新する（最初の数フレームは前回の計測値を使う）
     private func updateEstimate() {
+        guard let analysisStartDate else { return }
         let now = Date()
-        let elapsed = now.timeIntervalSince(phaseStartDate)
-        let remainingFrames = Double(max(0, totalFrames - currentFrame))
-
-        // 数フレーム処理するまでは実測値のばらつきが大きいため、前回の計測値を優先する
-        func rate(measuredAfter minimumFrames: Int, fallback: Double?) -> Double? {
-            if currentFrame >= minimumFrames {
-                return elapsed / Double(currentFrame)
-            }
-            return fallback
-        }
-
-        let remaining: TimeInterval?
-        switch phase {
-        case .extracting:
-            if let extraction = rate(measuredAfter: 3, fallback: previousRates?.extraction),
-               let detection = previousRates?.detection {
-                remaining = extraction * remainingFrames + detection * Double(totalFrames)
-            } else {
-                remaining = nil
-            }
-        case .detecting:
-            remaining = rate(measuredAfter: 2, fallback: previousRates?.detection).map { $0 * remainingFrames }
-        case .idle, .saving:
-            remaining = nil
-        }
-
-        estimatedCompletionDate = remaining.map { now.addingTimeInterval($0) }
+        let rate = currentFrame >= 3
+            ? now.timeIntervalSince(analysisStartDate) / Double(currentFrame)
+            : previousRate
+        estimatedCompletionDate = rate.map { now.addingTimeInterval($0 * Double(max(0, totalFrames - currentFrame))) }
     }
 
     /// スクリーンショット用のデモデータを解析結果として表示する
-    func showDemo(record: SavedAnalysis, frames: [FrameDetectionResult]) {
+    func showDemo(record: SavedAnalysis) {
         videoURL = URL.temporaryDirectory.appending(path: record.videoName)
-        detectionResults = frames
         currentRecordID = record.id
     }
-    
+
     /// 解析結果を確認済みにする
     func markResultSeen() {
         hasUnseenResult = false
@@ -371,17 +375,37 @@ class VideoAnalysisViewModel {
         analysisTask?.cancel()
     }
 
+    /// 解析結果を閉じて、同じ動画・設定で解析をやり直せる状態に戻す
+    func closeResult() {
+        currentRecordID = nil
+        hasUnseenResult = false
+        errorMessage = nil
+    }
+
     /// リセット
     func reset() {
         cancelAnalysis()
         videoURL = nil
+        videoDuration = nil
+        setup = nil
+        setupImage = nil
         analysisProgress = 0.0
         currentFrame = 0
         totalFrames = 0
         errorMessage = nil
-        detectionResults = []
         currentRecordID = nil
         hasUnseenResult = false
-        estimatedCompletionDate = nil
+    }
+}
+
+/// 解析のエラー
+nonisolated enum AnalysisError: Error, LocalizedError {
+    case noFrames
+
+    var errorDescription: String? {
+        switch self {
+        case .noFrames:
+            return "指定した区間からフレームを取り出せませんでした"
+        }
     }
 }

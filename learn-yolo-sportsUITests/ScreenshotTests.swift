@@ -18,7 +18,7 @@ final class ScreenshotTests: XCTestCase {
     
     @MainActor
     func testScreenshots() {
-        capture("01_Result", tab: "analysis", arguments: ["-demoData", "YES"], waitFor: "総検出数")
+        capture("01_Result", tab: "analysis", arguments: ["-demoData", "YES"], waitFor: "解析フレーム")
         capture("02_Advice", tab: "analysis", arguments: ["-demoData", "YES", "-showAdvice", "YES"], waitFor: "総評")
         capture("03_History", tab: "history", arguments: ["-demoData", "YES"], waitFor: "demo_match.mp4")
         capture("04_Start", tab: "analysis", waitFor: "スポーツ動画を解析")

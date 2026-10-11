@@ -65,7 +65,8 @@ struct AdviceView: View {
             adviceSections(
                 summary: partial.summary,
                 observations: partial.observations ?? [],
-                suggestions: partial.suggestions ?? []
+                suggestions: partial.suggestions ?? [],
+                playerAdvice: partial.playerAdvice ?? []
             )
         } else if advisor.isGenerating {
             HStack {
@@ -77,7 +78,8 @@ struct AdviceView: View {
             adviceSections(
                 summary: advice.summary,
                 observations: advice.observations,
-                suggestions: advice.suggestions
+                suggestions: advice.suggestions,
+                playerAdvice: advice.playerAdvice ?? []
             )
             
             Text("生成日時: \(advice.generatedAt.formatted(date: .abbreviated, time: .shortened))")
@@ -111,12 +113,14 @@ struct AdviceView: View {
             .buttonStyle(.borderedProminent)
         }
         
-        Text("Apple Intelligence により端末上で生成されます。検出結果にはチームの区別がなく、誤検出も含まれるため参考情報としてご利用ください。")
+        Text(record.coachReport == nil
+             ? "Apple Intelligence により端末上で生成されます。コート設定なしの解析のためチームの区別がなく、参考情報としてご利用ください。"
+             : "Apple Intelligence により端末上で生成されます。場面の判定は規則に基づいて行い、AI はその言語化だけを担当します。")
             .font(.caption2)
             .foregroundStyle(.secondary)
     }
     
-    private func adviceSections(summary: String?, observations: [String], suggestions: [String]) -> some View {
+    private func adviceSections(summary: String?, observations: [String], suggestions: [String], playerAdvice: [String]) -> some View {
         VStack(alignment: .leading, spacing: 20) {
             if let summary, !summary.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -127,11 +131,15 @@ struct AdviceView: View {
             }
             
             if !observations.isEmpty {
-                bulletSection(title: "観察ポイント", systemImage: "eye", items: observations)
+                bulletSection(title: "場面の解説", systemImage: "eye", items: observations)
             }
             
             if !suggestions.isEmpty {
-                bulletSection(title: "改善提案", systemImage: "lightbulb", items: suggestions)
+                bulletSection(title: "次に取り組むこと", systemImage: "lightbulb", items: suggestions)
+            }
+            
+            if !playerAdvice.isEmpty {
+                bulletSection(title: "選手へのアドバイス", systemImage: "person.fill", items: playerAdvice)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
