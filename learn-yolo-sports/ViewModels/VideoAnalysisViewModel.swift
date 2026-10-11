@@ -144,7 +144,8 @@ final class VideoAnalysisViewModel {
 
     /// 新しく選んだ動画の解析を開始する（選んだ操作そのものがユーザー操作なので、そのままバックグラウンド継続を申請できる）
     /// - Parameter session: 動画の読み込みから続けているバックグラウンド継続（なければ解析の開始時に申請する）
-    func startNewAnalysis(videoAt url: URL, session: ContinuedProcessingSession? = nil) {
+    /// - Parameter fingerprint: 同じ動画を選び直したときに見分けるための目印
+    func startNewAnalysis(videoAt url: URL, fingerprint: VideoFingerprint? = nil, session: ContinuedProcessingSession? = nil) {
         guard !isAnalyzing else {
             session?.finish(success: false)
             return
@@ -152,7 +153,106 @@ final class VideoAnalysisViewModel {
         isAnalyzing = true
         handedOverSession = session
         analysisTask = Task {
-            await self.beginAndRunPipeline(videoAt: url)
+            await self.beginAndRunPipeline(videoAt: url, fingerprint: fingerprint)
+        }
+    }
+
+    // MARK: - Reuse
+
+    /// 検出の条件の版。検出や属性付与（コート内の判定・背番号の読み取りなど）を変えたときは上げる
+    private static let detectionPipelineVersion = 1
+
+    /// 検出の条件（版・間隔・モデル）。同じなら保存済みの検出結果を使い回せる
+    private static func detectionVersion(usedRealModel: Bool) -> String {
+        "\(detectionPipelineVersion)-\(framesPerSecond)fps-\(usedRealModel ? YOLODetector.modelName : "mock")"
+    }
+
+    /// 前回の検出結果を使って解析し直しているか
+    private(set) var isReusingDetections = false
+
+    /// 同じ動画で、今と同じ条件の検出結果が保存されている解析結果
+    func reusableRecordID(for fingerprint: VideoFingerprint) async -> UUID? {
+        let version = Self.detectionVersion(usedRealModel: await detector.isModelLoaded)
+        return store.records.first { record in
+            guard record.detectionVersion == version,
+                  record.fingerprint?.matches(fingerprint) == true,
+                  let url = store.videoURL(for: record) else { return false }
+            return FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
+        }?.id
+    }
+
+    /// 保存済みの検出結果を使い、選手の識別・シーンの区切り・選択肢・AI 解説を作り直して上書きする
+    ///
+    /// 検出は 15 分の動画で数十分かかるが、それ以降は数秒で終わる。
+    /// 識別の方式も人数の設定も変わっていなければ、前回の結果をそのまま表示する。
+    func reanalyze(recordID: UUID, fingerprint: VideoFingerprint?) {
+        guard !isAnalyzing, let record = store.record(for: recordID) else { return }
+        let playersPerTeam = AnalysisSettings.playersPerTeam
+        errorMessage = nil
+
+        if record.trackingVersion == PlayerTracker.version, record.playersPerTeam == playersPerTeam {
+            currentRecordID = recordID
+            hasUnseenResult = true
+            generateMissingAdvice(for: recordID)
+            return
+        }
+
+        isAnalyzing = true
+        isReusingDetections = true
+        phase = .segmenting
+        currentRecordID = nil
+        hasUnseenResult = false
+        analysisProgress = 0.85
+        activeVideoURL = store.videoURL(for: record)
+
+        analysisTask = Task {
+            defer {
+                self.isAnalyzing = false
+                self.isReusingDetections = false
+                self.phase = .idle
+            }
+            let aspectRatio = Self.aspectRatio(width: record.imageWidth, height: record.imageHeight)
+            let duration = record.videoDuration ?? record.coveredDuration
+            let (frames, result, segments) = await Task.detached(priority: .userInitiated) {
+                var frames = record.frames
+                let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
+                var segments = SceneSegmenter.segments(frames: frames, duration: duration)
+                for index in segments.indices {
+                    segments[index].tactics = TacticalPlanner.snapshot(
+                        for: segments[index],
+                        frames: frames.filter { segments[index].contains($0.timestamp) },
+                        aspectRatio: aspectRatio,
+                        players: result.players
+                    )
+                }
+                return (frames, result, segments)
+            }.value
+            guard !Task.isCancelled, var updated = self.store.record(for: recordID) else { return }
+
+            updated.frames = frames
+            updated.teams = result.teams
+            updated.players = result.players
+            updated.segments = segments
+            updated.playersPerTeam = playersPerTeam
+            updated.trackingVersion = PlayerTracker.version
+            if let assetIdentifier = fingerprint?.assetIdentifier {
+                updated.fingerprint?.assetIdentifier = assetIdentifier
+            }
+            // 選手もシーンも変わるため、AI の総評・解説・選手のアドバイスは作り直す
+            updated.advice = nil
+            updated.playerAdvice = nil
+            updated.adviceUnavailableReason = IntelligenceAdvisor.unavailableReason ?? IntelligenceAdvisor.deferredMessage
+
+            do {
+                try self.store.update(updated)
+            } catch {
+                self.errorMessage = "エラー: \(error.localizedDescription)"
+                return
+            }
+            self.currentRecordID = recordID
+            self.hasUnseenResult = true
+            self.isAnalyzing = false
+            self.generateMissingAdvice(for: recordID)
         }
     }
 
@@ -235,7 +335,7 @@ final class VideoAnalysisViewModel {
 
     // MARK: - Pipeline
 
-    private func beginAndRunPipeline(videoAt url: URL) async {
+    private func beginAndRunPipeline(videoAt url: URL, fingerprint: VideoFingerprint?) async {
         let id = UUID()
         phase = .detecting
         hasUnseenResult = false
@@ -253,7 +353,7 @@ final class VideoAnalysisViewModel {
             )
             activeVideoURL = destination
 
-            guard let checkpoint = store.checkpoint(for: id) else {
+            guard var checkpoint = store.checkpoint(for: id) else {
                 errorMessage = "解析を開始できませんでした"
                 isAnalyzing = false
                 phase = .idle
@@ -261,6 +361,8 @@ final class VideoAnalysisViewModel {
                 handedOverSession = nil
                 return
             }
+            checkpoint.fingerprint = fingerprint
+            try store.updateCheckpoint(checkpoint)
             await runPipeline(checkpoint: checkpoint)
         } catch {
             errorMessage = "エラー: \(error.localizedDescription)"
@@ -391,6 +493,9 @@ final class VideoAnalysisViewModel {
                 segments: segments
             )
             record.playersPerTeam = checkpoint.playersPerTeam
+            record.fingerprint = checkpoint.fingerprint
+            record.detectionVersion = Self.detectionVersion(usedRealModel: checkpoint.usedRealModel)
+            record.trackingVersion = PlayerTracker.version
 
             var adviceFailureReason: String? = IntelligenceAdvisor.unavailableReason
             // バックグラウンドでは生成が制限されるため、一度制限されたら残りはアプリを開いたときに作る
@@ -701,8 +806,7 @@ final class VideoAnalysisViewModel {
             let aspectRatio = Self.aspectRatio(width: record.imageWidth, height: record.imageHeight)
             let (frames, result) = await Task.detached(priority: .userInitiated) {
                 var frames = record.frames
-                let result = PlayerTracker.analyze(frames: frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
-                result.apply(to: &frames)
+                let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
                 return (frames, result)
             }.value
 
@@ -711,6 +815,7 @@ final class VideoAnalysisViewModel {
             updated.teams = result.teams
             updated.players = result.players
             updated.playersPerTeam = playersPerTeam
+            updated.trackingVersion = PlayerTracker.version
             updated.playerAdvice = nil
             updated.segments = updated.segments?.map { segment in
                 var segment = segment
