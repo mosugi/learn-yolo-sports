@@ -180,6 +180,7 @@ nonisolated enum PlayerTracker {
 
         // 3. 追跡し、途切れた追跡をつなぎ直して、追跡ごとにチームを決める
         var tracks = track(observations: observations, votes: votes, frames: frames, sections: sections)
+        tracks = splitAtAppearanceChanges(tracks, observations: observations, votes: votes)
         tracks = stitch(tracks, sections: sections)
         for index in tracks.indices {
             tracks[index].team = (tracks[index].isGoalkeeper || tracks[index].isReferee) ? nil : tracks[index].colorTeam
@@ -313,6 +314,10 @@ nonisolated enum PlayerTracker {
     static let newSlotCost = 3.0
     /// これより費用が大きい枠には入れない。無理につなぐと別の人に切り替わるため、呼び名を付けずにおく
     static let maxLinkCost = 4.0
+    /// 割り当てを見直す回数
+    static let refinementPasses = 3
+    /// 見直しで追跡を移すのに必要な費用の差（わずかな差では動かさない）
+    static let refinementMargin = 0.3
     /// 持ち場の奥行きの違いの目安（画面の高さに対する割合）
     static let laneScale = 0.15
     /// 持ち場の前後の位置（チームの中心からの距離）の違いの目安（画面の高さを 1 とした単位）
@@ -442,6 +447,27 @@ nonisolated enum PlayerTracker {
             return (best.key, best.value)
         }
 
+        /// 追跡を枠（members）に入れるときの費用。時間が重なる・背番号が食い違う枠には入れられない（nil）
+        func fitCost(_ track: Track, _ members: [Track]) -> Double? {
+            guard !members.isEmpty, !members.contains(where: { overlaps($0, track) }) else { return nil }
+            let slotNumber = number(of: members)?.number
+            if let slotNumber, let own = track.jerseyNumber, slotNumber != own { return nil }
+
+            let previous = members.last { $0.last.time < track.first.time }
+            let next = members.first { $0.first.time > track.last.time }
+            var cost = [previous.map { linkCost(from: $0, to: track) }, next.map { linkCost(from: track, to: $0) }]
+                .compactMap { $0 }
+                .min() ?? 1
+            if let own = track.appearance, let slot = appearance(of: members) {
+                cost += AppearanceExtractor.distance(own, slot) / appearanceScale
+            } else {
+                cost += 1
+            }
+            cost += roleCost(track, members)
+            if let slotNumber, slotNumber == track.jerseyNumber { cost -= 1.5 }
+            return cost
+        }
+
         var slotsByTeam: [Int: [[Track]]] = [:]
         var extraTracks: [Int] = []
 
@@ -450,26 +476,13 @@ nonisolated enum PlayerTracker {
             let candidates = tracks
                 .filter { !$0.isGoalkeeper && !$0.isReferee && $0.team == team && duration($0) >= minimumSlotDuration }
                 .sorted { duration($0) > duration($1) }
+            var unassigned: [Track] = []
 
+            // 1. 長く写っていた追跡から順に、最も自然につながる枠へ入れる
             for track in candidates {
                 var best: (slot: Int, cost: Double)?
                 for (index, members) in slots.enumerated() {
-                    guard !members.contains(where: { overlaps($0, track) }) else { continue }
-                    let slotNumber = number(of: members)?.number
-                    if let slotNumber, let own = track.jerseyNumber, slotNumber != own { continue }
-
-                    let previous = members.last { $0.last.time < track.first.time }
-                    let next = members.first { $0.first.time > track.last.time }
-                    var cost = [previous.map { linkCost(from: $0, to: track) }, next.map { linkCost(from: track, to: $0) }]
-                        .compactMap { $0 }
-                        .min() ?? 1
-                    if let own = track.appearance, let slot = appearance(of: members) {
-                        cost += AppearanceExtractor.distance(own, slot) / appearanceScale
-                    } else {
-                        cost += 1
-                    }
-                    cost += roleCost(track, members)
-                    if let slotNumber, slotNumber == track.jerseyNumber { cost -= 1.5 }
+                    guard let cost = fitCost(track, members) else { continue }
                     if best == nil || cost < best!.cost { best = (index, cost) }
                 }
 
@@ -480,8 +493,45 @@ nonisolated enum PlayerTracker {
                     slots[best.slot].sort { $0.first.time < $1.first.time }
                 } else if best == nil {
                     extraTracks.append(track.id)
+                } else {
+                    // どの枠とも無理なくつながらない追跡は、呼び名を付けずチームの色だけで表示する
+                    unassigned.append(track)
                 }
-                // どの枠とも無理なくつながらない追跡は、呼び名を付けずチームの色だけで表示する
+            }
+
+            // 2. 全体が決まってから見直す。最初は枠の見た目や持ち場が定まっていないため、
+            //    早く入れた追跡ほど誤りやすい。他の枠（または未割り当て）の方がはっきり自然なら移す
+            for _ in 0..<refinementPasses {
+                var moved = false
+                for track in candidates where !extraTracks.contains(track.id) {
+                    let current = slots.firstIndex { $0.contains { $0.id == track.id } }
+                    let currentCost: Double
+                    if let current {
+                        let others = slots[current].filter { $0.id != track.id }
+                        // 枠に 1 本しかない追跡は動かさない（枠そのものを空にしない）
+                        guard !others.isEmpty, let cost = fitCost(track, others) else { continue }
+                        currentCost = cost
+                    } else {
+                        currentCost = maxLinkCost
+                    }
+
+                    var best: (slot: Int, cost: Double)?
+                    for (index, members) in slots.enumerated() where index != current {
+                        guard let cost = fitCost(track, members) else { continue }
+                        if best == nil || cost < best!.cost { best = (index, cost) }
+                    }
+                    guard let best, best.cost + refinementMargin < currentCost else { continue }
+
+                    if let current {
+                        slots[current].removeAll { $0.id == track.id }
+                    } else {
+                        unassigned.removeAll { $0.id == track.id }
+                    }
+                    slots[best.slot].append(track)
+                    slots[best.slot].sort { $0.first.time < $1.first.time }
+                    moved = true
+                }
+                if !moved { break }
             }
             slotsByTeam[team] = slots
         }
@@ -647,7 +697,8 @@ nonisolated enum PlayerTracker {
     }
 
     nonisolated struct Track {
-        let id: Int
+        /// tracks の添字と同じ（分けたりまとめたりしたら付け直す）
+        var id: Int
         var points: [TrackPoint]
         var velocityX = 0.0
         var velocityY = 0.0
@@ -828,6 +879,68 @@ nonisolated enum PlayerTracker {
             }
         }
         return tracks
+    }
+
+    // MARK: - Identity switches
+
+    /// 前後で見た目がこれ以上違えば、追跡が別の人に乗り移ったとみなす
+    static let switchAppearanceDistance = 0.85
+    /// 分ける前後それぞれに必要な見た目の特徴の数
+    static let minimumSamplesPerSide = 2
+
+    /// 追跡の途中で見た目がはっきり変わった所で分ける
+    ///
+    /// 同じユニフォームの選手が交差すると、位置だけの対応付けでは追跡が別の人に乗り移ることがある。
+    /// 見た目の特徴の並びを前後に分けて平均を比べ、最も違う所が閾値を超えていれば、そこで 2 つの追跡にする。
+    static func splitAtAppearanceChanges(_ tracks: [Track], observations: [[Observation]], votes: [[TeamVote?]]) -> [Track] {
+        func rebuild(_ points: ArraySlice<TrackPoint>) -> Track {
+            var track = Track(id: 0, points: [])
+            for point in points {
+                track.add(point, observation: observations[point.frame][point.observation], vote: votes[point.frame][point.observation])
+            }
+            return track
+        }
+        func split(_ track: Track, depth: Int) -> [Track] {
+            // 見た目の特徴がある観測（点の番号と特徴）
+            let samples: [(index: Int, vector: [Float])] = track.points.enumerated().compactMap { index, point in
+                observations[point.frame][point.observation].appearance.map { (index, $0) }
+            }
+            guard depth < 3, samples.count >= minimumSamplesPerSide * 2 else { return [track] }
+
+            var best: (sample: Int, distance: Double)?
+            for k in minimumSamplesPerSide...(samples.count - minimumSamplesPerSide) {
+                guard let before = mean(samples[..<k].map(\.vector)), let after = mean(samples[k...].map(\.vector)) else { continue }
+                let distance = AppearanceExtractor.distance(before, after)
+                if best == nil || distance > best!.distance { best = (k, distance) }
+            }
+            guard let best, best.distance >= switchAppearanceDistance else { return [track] }
+
+            // 見た目が変わった 2 つの観測の間で分ける
+            let cut = (samples[best.sample - 1].index + samples[best.sample].index + 1) / 2
+            let head = rebuild(track.points[..<cut])
+            let tail = rebuild(track.points[cut...])
+            return split(head, depth: depth + 1) + split(tail, depth: depth + 1)
+        }
+
+        var result: [Track] = []
+        for track in tracks {
+            for part in split(track, depth: 0) where !part.points.isEmpty {
+                var part = part
+                part.id = result.count
+                result.append(part)
+            }
+        }
+        return result
+    }
+
+    /// 単位ベクトルの平均（単位長さにする）
+    private static func mean(_ vectors: [[Float]]) -> [Float]? {
+        guard let first = vectors.first else { return nil }
+        var sum = first
+        for vector in vectors.dropFirst() where vector.count == sum.count {
+            for index in sum.indices { sum[index] += vector[index] }
+        }
+        return AppearanceExtractor.normalized(sum)
     }
 
     /// 追跡が途切れた後に始まった追跡のうち、つながりうるものを1本にまとめる
