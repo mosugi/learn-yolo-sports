@@ -326,7 +326,8 @@ nonisolated enum MatchAnalyzer {
     static func teamVote(palette: [WeightedColor], own: LabColor, opponent: LabColor?) -> TeamVote? {
         guard let dominant = palette.first?.color else { return nil }
         guard let opponent else {
-            return team(of: dominant, own: own, opponent: nil).map { TeamVote(team: $0, strength: 1) }
+            // 相手の色が分からないときは「自チームの色でない」としか言えないため、審判を選手に戻す強さにはしない
+            return team(of: dominant, own: own, opponent: nil).map { TeamVote(team: $0, strength: refereeOverrideStrength / 2) }
         }
 
         var ownSupport = 0.0
@@ -363,13 +364,13 @@ nonisolated enum MatchAnalyzer {
     static let refereeOverrideStrength = 0.35
 
     private static func resolvedTeam(of track: Track, setup: AnalysisSetup) -> TeamSide? {
-        // 審判の判定が色の票を上回る追跡は審判のまま（チームに入れない）
-        if track.isReferee { return nil }
         // GK は色が違うため、守っているゴールの側で決める
         if track.isGoalkeeper {
             let meanX = track.points.map { Double($0.position.x) }.reduce(0, +) / Double(track.points.count)
             return setup.defendingTeam(atX: meanX)
         }
+        // 審判の判定が色の票を上回る追跡は審判のまま（チームに入れない）
+        if track.isReferee { return nil }
         return track.colorTeam
     }
 
@@ -385,8 +386,9 @@ nonisolated enum MatchAnalyzer {
         let isReferee: Bool
         let jerseyNumber: Int?
 
+        /// 代表色（チームの代表色の計算に使う。パレットの加重平均で、従来の平均色と同じ）
         var color: LabColor? {
-            palette.first?.color
+            WeightedColor.mean(palette)
         }
 
         /// 票の重み。画像の高さの 12% 未満に写る選手は、小さいほど軽くする
@@ -420,6 +422,8 @@ nonisolated enum MatchAnalyzer {
         var opponentVotes = 0.0
         /// 審判と判定され、色でもチームと言い切れなかった観測の重み
         var refereeVotes = 0.0
+        /// 審判と判定された観測の数
+        var refereeCount = 0
         var goalkeeperCount = 0
         var numberVotes: [Int: Int] = [:]
         var team: TeamSide?
@@ -444,8 +448,14 @@ nonisolated enum MatchAnalyzer {
             goalkeeperCount * 2 > points.count
         }
 
+        /// 過半数の観測で審判と判定されたか
+        var isMostlyReferee: Bool {
+            refereeCount * 2 > points.count
+        }
+
+        /// 審判として扱うか（過半数が審判の判定で、色の票でもチームと言い切れない）
         var isReferee: Bool {
-            refereeVotes > ownVotes + opponentVotes
+            isMostlyReferee && refereeVotes > ownVotes + opponentVotes
         }
 
         /// 観測を1つ加え、チーム・GK・背番号の票を数える
@@ -454,6 +464,7 @@ nonisolated enum MatchAnalyzer {
             if observation.isGoalkeeper {
                 goalkeeperCount += 1
             } else if observation.isReferee {
+                refereeCount += 1
                 // 審判と判定されても、色がはっきり一方のチームなら選手として数える
                 if let vote, vote.strength >= MatchAnalyzer.refereeOverrideStrength {
                     addVote(vote, weight: observation.voteWeight)
@@ -531,6 +542,7 @@ nonisolated enum MatchAnalyzer {
                 track.ownVotes += part.ownVotes
                 track.opponentVotes += part.opponentVotes
                 track.refereeVotes += part.refereeVotes
+                track.refereeCount += part.refereeCount
                 track.goalkeeperCount += part.goalkeeperCount
                 track.numberVotes.merge(part.numberVotes, uniquingKeysWith: +)
                 current = next[index]
@@ -568,6 +580,10 @@ nonisolated enum MatchAnalyzer {
                     guard d <= gate else { continue }
                     if let trackTeam, let vote = votes[state][observationIndex],
                        vote.strength >= colorConflictStrength, vote.team != trackTeam {
+                        d += colorConflictPenalty
+                    }
+                    // 審判の追跡と選手の追跡が、すれ違うときに入れ替わらないようにする
+                    if track.points.count >= 3, track.isMostlyReferee != observation.isReferee {
                         d += colorConflictPenalty
                     }
                     pairs.append((trackIndex, observationIndex, d))

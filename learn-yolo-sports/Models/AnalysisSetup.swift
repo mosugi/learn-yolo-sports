@@ -197,6 +197,17 @@ nonisolated struct WeightedColor {
     /// 0〜1
     let weight: Double
 
+    /// 割合で重み付けした平均色
+    static func mean(_ palette: [WeightedColor]) -> LabColor? {
+        let total = palette.map(\.weight).reduce(0, +)
+        guard total > 0 else { return nil }
+        return LabColor(
+            l: palette.map { $0.color.l * $0.weight }.reduce(0, +) / total,
+            a: palette.map { $0.color.a * $0.weight }.reduce(0, +) / total,
+            b: palette.map { $0.color.b * $0.weight }.reduce(0, +) / total
+        )
+    }
+
     /// 色を最大 k 個にまとめる（k-means）。割合の大きい順に返す
     static func palette(of colors: [LabColor], k: Int = 3) -> [WeightedColor] {
         guard let mean = LabColor.mean(colors) else { return [] }

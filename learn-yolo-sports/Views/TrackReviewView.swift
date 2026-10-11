@@ -204,7 +204,7 @@ struct TrackReviewPanel: View {
 
     // MARK: - Actions
 
-    /// 評価を記録し、次のフレームへ進む（取り消しのときは進まない）
+    /// 評価を記録し、次の未評価のフレームへ進む（取り消しのときは進まない）
     private func setMark(_ mark: TrackReviewMark?) {
         let frameNumber = frame.frameNumber
         do {
@@ -221,7 +221,8 @@ struct TrackReviewPanel: View {
             return
         }
 
-        if mark != nil, let next = frames.first(where: { $0.frameNumber > frameNumber }) {
+        // 評価済みのフレームに進んで上書きしないよう、未評価のフレームへ進む
+        if mark != nil, let next = frames.first(where: { $0.frameNumber > frameNumber && marks[$0.frameNumber] == nil }) {
             onJump(next.frameNumber)
         }
     }
@@ -274,15 +275,13 @@ struct TrackTimeline: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onEnded { value in
-                        let index = Int(value.location.x / cellWidth)
-                        if frames.indices.contains(index) {
-                            onJump(frames[index].frameNumber)
-                        }
-                    }
-            )
+            // ドラッグは親の ScrollView のスクロールに任せ、タップだけを受け取る
+            .onTapGesture { location in
+                let index = Int(location.x / cellWidth)
+                if frames.indices.contains(index) {
+                    onJump(frames[index].frameNumber)
+                }
+            }
         }
         .accessibilityElement()
         .accessibilityLabel("フレームごとの評価")

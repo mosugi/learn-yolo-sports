@@ -37,9 +37,9 @@ nonisolated struct ProcessedDetection {
         SportsClass(rawValue: label)
     }
 
-    /// ユニフォームの主な色（最も多くを占める色）
+    /// ユニフォームの平均色（背番号を読む選手の絞り込みに使う）
     var jerseyColor: LabColor? {
-        jerseyPalette?.first?.color
+        jerseyPalette.flatMap(WeightedColor.mean)
     }
 }
 
