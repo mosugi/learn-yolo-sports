@@ -308,11 +308,19 @@ nonisolated enum PlayerTracker {
 
     // MARK: - Identity
 
-    /// 位置と見た目の費用の合計。1 以下ずつなら無理がない（見た目の特徴がなければ見た目は 1 とみなす）
+    /// 位置・見た目・持ち場の費用の合計。それぞれ 1 以下なら無理がない（見た目の特徴がなければ見た目は 1 とみなす）
     /// 新しい選手の枠を使う代わりに、既存の枠へつなぐときの費用の上限
-    static let newSlotCost = 2.0
+    static let newSlotCost = 3.0
     /// これより費用が大きい枠には入れない。無理につなぐと別の人に切り替わるため、呼び名を付けずにおく
-    static let maxLinkCost = 2.8
+    static let maxLinkCost = 4.0
+    /// 持ち場の奥行きの違いの目安（画面の高さに対する割合）
+    static let laneScale = 0.15
+    /// 持ち場の前後の位置（チームの中心からの距離）の違いの目安（画面の高さを 1 とした単位）
+    static let lineScale = 0.4
+    /// チームの中心を求めるのに必要な、同じフレームに写る選手の数
+    static let minimumPlayersForCenter = 3
+    /// チームの中心が分からないフレームで、前後のフレームを探す範囲
+    static let maxCenterSearch = 6
     /// 見た目の距離の目安（単位ベクトルの距離。これ以下ならよく似ている）
     static let appearanceScale = 0.6
     /// 途切れた追跡を直後につなぎ直すときの、見た目の距離の上限
@@ -336,15 +344,86 @@ nonisolated enum PlayerTracker {
         func overlaps(_ a: Track, _ b: Track) -> Bool {
             a.first.time <= b.last.time && b.first.time <= a.last.time
         }
+        // --- サッカーの動きの前提 ---
+        // 1. チームはまとまって動く: 各フレームのチームの中心（写っている選手の x の中央値）を求め、
+        //    画面外にいた選手も、その間にチームが動いた分だけ動いたと予測する
+        // 2. 選手は持ち場を大きく変えない: 奥行き（どちらのタッチライン寄りか）と、
+        //    チームの中心から見た前後の位置（DF・MF・FW のどの列か）が近い追跡を同じ選手とみなしやすくする
+        var centerX: [Int: [Int: Double]] = [:]
+        do {
+            var xs: [Int: [Int: [Double]]] = [:]
+            for track in tracks where !track.isGoalkeeper && !track.isReferee {
+                guard let team = track.team else { continue }
+                for point in track.points {
+                    xs[team, default: [:]][point.frame, default: []].append(Double(point.position.x))
+                }
+            }
+            for (team, frames) in xs {
+                for (frame, values) in frames where values.count >= minimumPlayersForCenter {
+                    let sorted = values.sorted()
+                    centerX[team, default: [:]][frame] = sorted[sorted.count / 2]
+                }
+            }
+        }
+        /// 指定フレームに最も近い、チームの中心が分かるフレームの中心
+        func teamCenter(_ team: Int?, near frame: Int) -> Double? {
+            guard let team, let centers = centerX[team] else { return nil }
+            for offset in 0...maxCenterSearch {
+                if let value = centers[frame - offset] { return value }
+                if let value = centers[frame + offset] { return value }
+            }
+            return nil
+        }
+
+        /// 追跡の持ち場（奥行きと、チームの中心から見た前後の位置）
+        struct Role {
+            var lane = 0.0, line = 0.0, laneCount = 0.0, lineCount = 0.0
+            mutating func add(_ other: Role) {
+                lane += other.lane; line += other.line
+                laneCount += other.laneCount; lineCount += other.lineCount
+            }
+        }
+        var roleCache: [Int: Role] = [:]
+        func role(of track: Track) -> Role {
+            if let cached = roleCache[track.id] { return cached }
+            var role = Role()
+            for point in track.points {
+                role.lane += Double(point.position.y)
+                role.laneCount += 1
+                if let center = teamCenter(track.team, near: point.frame) {
+                    role.line += Double(point.position.x) - center
+                    role.lineCount += 1
+                }
+            }
+            roleCache[track.id] = role
+            return role
+        }
+        /// 持ち場の違い（1 以下なら同じ持ち場とみなせる）
+        func roleCost(_ track: Track, _ members: [Track]) -> Double {
+            let own = role(of: track)
+            var slot = Role()
+            for member in members { slot.add(role(of: member)) }
+            guard own.laneCount > 0, slot.laneCount > 0 else { return 1 }
+            let lane = abs(own.lane / own.laneCount - slot.lane / slot.laneCount) / laneScale
+            guard own.lineCount > 0, slot.lineCount > 0 else { return lane }
+            let line = abs(own.line / own.lineCount - slot.line / slot.lineCount) / lineScale
+            return (lane + line) / 2
+        }
+
         /// a の終わりから b の始まりへ、同じ人が移動できたか（1 以下なら無理がない）
+        ///
+        /// 画面外にいた間は、チームの中心が動いた分だけ選手も動いたと予測して比べる。
         func linkCost(from a: Track, to b: Track) -> Double {
             let gap = max(0, b.first.time - a.last.time)
             let height = (a.last.height + b.first.height) / 2
+            var predicted = a.last.position
+            if let start = teamCenter(a.team, near: a.last.frame), let end = teamCenter(a.team, near: b.first.frame) {
+                predicted.x += CGFloat(end - start)
+            }
+            // チームと一緒に動いた分は予測に入っているため、個人の動きの余裕は長い間でも広げすぎない
             let reach = positionTolerance + maxSpeed * min(gap, maxStitchGap)
-            // 長く離れていた追跡ほど、位置からは同じ人と言い切れないため少し費用を足す
-            return distance(a.last.position, b.first.position, height: height) / reach + gap / 120
+            return distance(predicted, b.first.position, height: height) / reach + gap / 120
         }
-        /// 背番号の票をまとめて、過半数を占める背番号（2回以上読めたもの）
         /// 枠の見た目（追跡の特徴の平均）
         func appearance(of members: [Track]) -> [Float]? {
             var total = Track(id: -1, points: [])
@@ -353,6 +432,7 @@ nonisolated enum PlayerTracker {
             }
             return total.appearance
         }
+        /// 背番号の票をまとめて、過半数を占める背番号（2回以上読めたもの）
         func number(of members: [Track]) -> (number: Int, votes: Int)? {
             var votes: [Int: Int] = [:]
             for member in members { votes.merge(member.numberVotes, uniquingKeysWith: +) }
@@ -388,6 +468,7 @@ nonisolated enum PlayerTracker {
                     } else {
                         cost += 1
                     }
+                    cost += roleCost(track, members)
                     if let slotNumber, slotNumber == track.jerseyNumber { cost -= 1.5 }
                     if best == nil || cost < best!.cost { best = (index, cost) }
                 }
