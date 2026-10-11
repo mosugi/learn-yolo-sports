@@ -27,6 +27,28 @@ nonisolated enum DemoData {
     static func make(directory: URL) -> SavedAnalysis {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var random = SeededRandom(seed: 20261009)
+        let duration = Double(frameCount) / Double(framesPerSecond)
+
+        // 背番号が読めた選手は #番号、読めなかった選手は記号で呼ぶ（Figure の並び順と同じ）
+        let teams = [
+            TeamInfo(id: 0, name: "青チーム", color: RGBColor(red: 0.15, green: 0.35, blue: 0.85)),
+            TeamInfo(id: 1, name: "白チーム", color: RGBColor(red: 0.96, green: 0.96, blue: 0.96)),
+        ]
+        let blueNames: [(Int?, String?)] = [(3, nil), (5, nil), (nil, "A"), (8, nil), (10, nil), (nil, "B"), (9, nil)]
+        let whiteNames: [(Int?, String?)] = [(4, nil), (nil, "C"), (6, nil), (11, nil), (nil, "D"), (14, nil), (7, nil)]
+        var players: [PlayerIdentity] = []
+        for (team, names) in [(0, blueNames), (1, whiteNames)] {
+            for (number, letter) in names {
+                players.append(PlayerIdentity(
+                    id: players.count, team: team, jerseyNumber: number, letter: letter,
+                    isGoalkeeper: false, firstSeen: 0, lastSeen: duration, frameCount: frameCount
+                ))
+            }
+        }
+        players.append(PlayerIdentity(
+            id: players.count, team: nil, jerseyNumber: 1, letter: "右",
+            isGoalkeeper: true, firstSeen: 0, lastSeen: duration, frameCount: frameCount
+        ))
         
         // 各選手の基準位置（正規化座標）。左が青チーム、右が白チーム
         let blueBase: [CGPoint] = [CGPoint(x: 0.22, y: 0.30), CGPoint(x: 0.20, y: 0.68), CGPoint(x: 0.33, y: 0.48), CGPoint(x: 0.42, y: 0.26), CGPoint(x: 0.45, y: 0.70), CGPoint(x: 0.55, y: 0.42), CGPoint(x: 0.60, y: 0.60)]
@@ -59,9 +81,10 @@ nonisolated enum DemoData {
                     imageFileName = fileName
                 }
             }
-            // 図形の並びは毎フレーム同じなので、並び順を追跡 ID として使う
+            // 図形の並びは毎フレーム同じなので、並び順を追跡 ID・選手 ID として使う
             let detections = figures.enumerated().map { trackID, figure in
                 let box = figure.boundingBox(in: size)
+                let isPerson = figure.kind != .ball
                 return SavedDetection(
                     label: figure.kind.label,
                     confidence: Float(random.next(in: 0.72...0.96)),
@@ -71,8 +94,10 @@ nonisolated enum DemoData {
                         width: box.width / size.width,
                         height: box.height / size.height
                     ),
+                    inCourt: isPerson ? true : nil,
                     team: figure.kind.team,
-                    trackID: figure.kind == .ball ? nil : trackID
+                    trackID: isPerson ? trackID : nil,
+                    playerID: trackID < players.count ? trackID : nil
                 )
             }
             
@@ -80,10 +105,35 @@ nonisolated enum DemoData {
                 frameNumber: index,
                 timestamp: Double(index) / Double(framesPerSecond),
                 imageFileName: imageFileName,
-                detections: detections
+                detections: detections,
+                cameraOffset: .zero
             ))
         }
-        
+
+        let aspectRatio = Double(size.width / size.height)
+        var segments = [
+            SceneSegment(startTime: 0, endTime: 3, keyTime: 1.5, kind: .buildUp),
+            SceneSegment(startTime: 3, endTime: duration, keyTime: 5, kind: .goalThreat),
+        ]
+        for index in segments.indices {
+            segments[index].tactics = TacticalPlanner.snapshot(
+                for: segments[index],
+                frames: frames.filter { segments[index].contains($0.timestamp) },
+                aspectRatio: aspectRatio,
+                players: players
+            )
+        }
+        segments[0].commentary = SceneCommentary(
+            headline: "中盤で前を向く",
+            commentary: "青チームが中盤でボールを持ち、白チームは中央を固めています。前線の選手が相手の間に立ち、パスを受ける準備ができています。",
+            suggestion: "空いている味方へ早めにつなぎ、相手が寄せる前に前進しましょう。"
+        )
+        segments[1].commentary = SceneCommentary(
+            headline: "右サイドから仕掛ける",
+            commentary: "ボールが右サイドへ運ばれ、ゴール前に両チームの選手が集まっています。白チームの GK も右に寄っています。",
+            suggestion: "逆サイドに走り込む選手を使い、密集を避けて仕掛けましょう。"
+        )
+
         var record = SavedAnalysis(
             id: id,
             createdAt: Date(timeIntervalSince1970: 1_791_500_000),
@@ -93,7 +143,10 @@ nonisolated enum DemoData {
             imageHeight: Int(size.height),
             processingDuration: 6.8,
             usedRealModel: true,
-            frames: frames
+            frames: frames,
+            teams: teams,
+            players: players,
+            segments: segments
         )
         record.advice = AnalysisAdvice(
             summary: "ボールは中盤から右サイドへ運ばれており、攻撃側が相手陣内へ押し込んでいる時間帯と読み取れます。ボール周辺には両チームの選手が集まり、局所的な密集が生じています。",
@@ -128,11 +181,11 @@ nonisolated enum DemoData {
                 }
             }
             
-            var team: TeamSide? {
+            var team: Int? {
                 switch self {
-                case .bluePlayer: return .own
-                case .whitePlayer, .goalkeeper: return .opponent
-                case .referee, .ball: return nil
+                case .bluePlayer: return 0
+                case .whitePlayer: return 1
+                case .goalkeeper, .referee, .ball: return nil
                 }
             }
         }

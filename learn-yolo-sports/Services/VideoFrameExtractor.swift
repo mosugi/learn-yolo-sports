@@ -6,145 +6,76 @@
 //
 
 import AVFoundation
-import CoreImage
-import UIKit
+import CoreGraphics
 
-/// 抽出したフレーム
-nonisolated struct ExtractedFrame {
-    let image: CGImage
-    /// 動画先頭からの時刻（秒）
-    let timestamp: Double
+/// 動画の長さと、指定の間隔で抽出した場合の総フレーム数
+nonisolated struct VideoInfo: Sendable {
+    let duration: Double
+    let totalFrames: Int
 }
 
-/// 動画からフレームを抽出するクラス
+/// 動画から指定秒のフレームを抽出するクラス
 ///
-/// フレームを配列に溜めずに1枚ずつ渡すため、抽出レートや解析時間を増やしてもメモリ使用量は増えない。
+/// 動画ごとに `AVAssetImageGenerator` をキャッシュして再利用する。actor は await で中断するたびに
+/// 再入可能になるため、このキャッシュ検索自体はすぐ戻り、複数フレームの生成は並行に進む。
+/// 毎フレームごとに asset を作り直すと、ファイルの再オープンと moov atom の再解析が
+/// フレーム数分繰り返されるため、ここでまとめて避ける。
 actor VideoFrameExtractor {
 
-    private let context = CIContext()
+    private var generators: [URL: AVAssetImageGenerator] = [:]
 
-    /// 動画の長さ（秒）
-    func duration(of url: URL) async throws -> Double {
-        let duration = try await AVURLAsset(url: url).load(.duration)
-        return CMTimeGetSeconds(duration)
-    }
-
-    /// 指定した区間のフレームを一定間隔で取り出し、1枚ずつ処理する
-    /// - Parameters:
-    ///   - url: 動画のURL
-    ///   - startTime: 開始時刻（秒）
-    ///   - duration: 区間の長さ（秒）
-    ///   - fps: 取り出すフレームレート
-    ///   - limit: 取り出す最大枚数
-    ///   - body: フレームと通し番号を受け取る処理。終わるまで次のフレームは読み込まない
-    func forEachFrame(
-        from url: URL,
-        startTime: Double,
-        duration: Double,
-        fps: Int,
-        limit: Int = .max,
-        body: @Sendable (ExtractedFrame, Int) async throws -> Void
-    ) async throws {
+    /// 動画の長さを取得する
+    /// - Parameter framesPerSecond: 1秒あたりに抽出するフレーム数
+    func videoInfo(for url: URL, framesPerSecond: Int) async throws -> VideoInfo {
         let asset = AVURLAsset(url: url)
 
-        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+        guard try await asset.loadTracks(withMediaType: .video).first != nil else {
             throw FrameExtractionError.noVideoTrack
         }
 
-        let reader = try AVAssetReader(asset: asset)
-        reader.timeRange = CMTimeRange(
-            start: CMTime(seconds: startTime, preferredTimescale: 600),
-            duration: CMTime(seconds: duration, preferredTimescale: 600)
-        )
+        let duration = try await asset.load(.duration)
+        let seconds = max(0, CMTimeGetSeconds(duration))
+        // 0秒時点のフレームも含めるため +1
+        let totalFrames = max(1, Int((seconds * Double(max(1, framesPerSecond))).rounded(.down)) + 1)
 
-        let output = AVAssetReaderTrackOutput(
-            track: videoTrack,
-            outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-        )
-        output.alwaysCopiesSampleData = false
-        reader.add(output)
-        guard reader.startReading() else {
-            throw reader.error ?? FrameExtractionError.failedToCreateReader
-        }
-        defer { reader.cancelReading() }
-
-        let interval = 1.0 / Double(max(1, fps))
-        // 小さな誤差でフレームを取りこぼさないよう、半フレーム分の許容をとる
-        let tolerance = 0.01
-        var nextTime = startTime
-        let endTime = startTime + duration
-        var index = 0
-
-        while let sampleBuffer = output.copyNextSampleBuffer() {
-            try Task.checkCancellation()
-
-            let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-            guard timestamp + tolerance >= nextTime else { continue }
-            guard timestamp < endTime else { break }
-
-            guard let image = createCGImage(from: sampleBuffer) else { continue }
-            try await body(ExtractedFrame(image: image, timestamp: timestamp), index)
-            index += 1
-
-            // 抽出レートより動画のフレームレートが低い場合も、時刻が前に進むようにする
-            while nextTime <= timestamp + tolerance {
-                nextTime += interval
-            }
-        }
-
-        if reader.status == .failed, let error = reader.error {
-            throw error
-        }
+        return VideoInfo(duration: seconds, totalFrames: totalFrames)
     }
 
-    /// 指定した時刻のフレームを1枚取り出す（解析時と同じ向き・解像度）
-    func frame(from url: URL, at time: Double) async throws -> CGImage {
-        let box = ResultBox()
-        try await forEachFrame(from: url, startTime: time, duration: 2, fps: 1, limit: 1) { frame, _ in
-            box.set(frame.image)
+    /// 指定秒のフレームを抽出する（並行に呼び出してよい）
+    /// - Parameters:
+    ///   - url: 動画のURL
+    ///   - time: 抽出する時刻（秒）
+    ///   - maximumDimension: 長辺の最大ピクセル数（同じ url への最初の呼び出しでのみ適用される）
+    func extractFrame(from url: URL, at time: Double, maximumDimension: CGFloat = 1280) async throws -> CGImage {
+        let generator = generator(for: url, maximumDimension: maximumDimension)
+        let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+        return try await generator.image(at: cmTime).image
+    }
+
+    private func generator(for url: URL, maximumDimension: CGFloat) -> AVAssetImageGenerator {
+        if let existing = generators[url] {
+            return existing
         }
-        guard let image = box.image else { throw FrameExtractionError.failedToCreateImage }
-        return image
-    }
 
-    /// サンプルバッファからCGImageを作成
-    private func createCGImage(from sampleBuffer: CMSampleBuffer) -> CGImage? {
-        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return nil
-        }
-        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        return context.createCGImage(ciImage, from: ciImage.extent)
-    }
-}
-
-/// クロージャから結果を受け取るための入れ物
-private nonisolated final class ResultBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: CGImage?
-
-    var image: CGImage? {
-        lock.withLock { stored }
-    }
-
-    func set(_ image: CGImage) {
-        lock.withLock { stored = image }
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        generator.maximumSize = CGSize(width: maximumDimension, height: maximumDimension)
+        generators[url] = generator
+        return generator
     }
 }
 
 /// フレーム抽出エラー
 nonisolated enum FrameExtractionError: Error, LocalizedError {
     case noVideoTrack
-    case failedToCreateReader
-    case failedToCreateImage
 
     var errorDescription: String? {
         switch self {
         case .noVideoTrack:
             return "動画トラックが見つかりません"
-        case .failedToCreateReader:
-            return "動画リーダーの作成に失敗しました"
-        case .failedToCreateImage:
-            return "画像の作成に失敗しました"
         }
     }
 }

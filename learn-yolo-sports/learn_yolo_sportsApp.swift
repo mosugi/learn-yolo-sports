@@ -32,7 +32,7 @@ struct learn_yolo_sportsApp: App {
         _analysisViewModel = State(initialValue: viewModel)
         
         Task {
-            try? await store.save(record)
+            try? await store.finalize(record)
         }
     }
     
