@@ -37,7 +37,8 @@ final class VideoImporter {
     }
 
     /// 動画を読み込む。キャンセルされた場合は CancellationError を投げる
-    func load(_ item: PhotosPickerItem) async throws -> VideoTransferable {
+    /// - Parameter onProgress: 進捗（0.0〜1.0）が分かるたびに呼ばれる（バックグラウンド継続の表示に使う）
+    func load(_ item: PhotosPickerItem, onProgress: ((Double) -> Void)? = nil) async throws -> VideoTransferable {
         cancel()
 
         let loadID = UUID()
@@ -68,6 +69,7 @@ final class VideoImporter {
                 let total = progress.totalUnitCount
                 let value: Double? = (total > 0 && !progress.isIndeterminate) ? progress.fractionCompleted : nil
                 self?.fraction = value
+                if let value { onProgress?(value) }
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }

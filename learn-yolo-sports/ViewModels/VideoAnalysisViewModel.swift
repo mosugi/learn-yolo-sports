@@ -52,6 +52,8 @@ final class VideoAnalysisViewModel {
     private static let batchSize = 4
     /// 解析中に表示するフレームの長辺
     private nonisolated static let previewDimension = 640
+    /// 解析中の表示を切り替える最短の間隔（秒）。速く切り替えるとちらついて見えるため
+    private static let previewInterval: TimeInterval = 0.8
 
     // MARK: - State
 
@@ -68,6 +70,7 @@ final class VideoAnalysisViewModel {
 
     /// 解析中に表示するフレーム
     var livePreview: AnalysisLivePreview?
+    private var livePreviewUpdatedAt = Date.distantPast
 
     /// 直近の解析結果の保存 ID（AnalysisStore から参照する）
     var currentRecordID: UUID?
@@ -122,8 +125,11 @@ final class VideoAnalysisViewModel {
     private let detector = YOLODetector()
 
     private var analysisTask: Task<Void, Never>?
+    /// 動画の読み込みから引き継いだバックグラウンド継続
+    private var handedOverSession: ContinuedProcessingSession?
     private var backgroundSession: ContinuedProcessingSession?
-    private var isRetryingCommentary = false
+    /// AI 解説を作成し直している解析結果
+    private(set) var retryingRecordID: UUID?
 
     init(store: AnalysisStore) {
         self.store = store
@@ -137,12 +143,27 @@ final class VideoAnalysisViewModel {
     }
 
     /// 新しく選んだ動画の解析を開始する（選んだ操作そのものがユーザー操作なので、そのままバックグラウンド継続を申請できる）
-    func startNewAnalysis(videoAt url: URL) {
-        guard !isAnalyzing else { return }
+    /// - Parameter session: 動画の読み込みから続けているバックグラウンド継続（なければ解析の開始時に申請する）
+    func startNewAnalysis(videoAt url: URL, session: ContinuedProcessingSession? = nil) {
+        guard !isAnalyzing else {
+            session?.finish(success: false)
+            return
+        }
         isAnalyzing = true
+        handedOverSession = session
         analysisTask = Task {
             await self.beginAndRunPipeline(videoAt: url)
         }
+    }
+
+    /// 動画の読み込みを始めるときに、バックグラウンド継続を申請する
+    ///
+    /// 動画の選択というユーザー操作の直後に申請することで、読み込み中にアプリを離れても
+    /// ライブアクティビティに進捗が出て、読み込みから解析まで続けて動く。
+    func beginImportSession(onExpire: @escaping () -> Void) -> ContinuedProcessingSession {
+        let session = ContinuedProcessingSession(onExpire: onExpire)
+        session.begin(title: "動画を解析中", subtitle: "動画を読み込み中")
+        return session
     }
 
     /// 中断された解析を再開する（ボタンのタップがユーザー操作になる）
@@ -184,18 +205,32 @@ final class VideoAnalysisViewModel {
         livePreview = nil
     }
 
-    /// アプリがフォアグラウンドに戻ったときに呼ぶ。バックグラウンドで生成できなかったAI解説を再試行する
+    /// アプリがフォアグラウンドに戻ったときに呼ぶ。バックグラウンドで生成できなかったAI解説を作成する
     func appDidBecomeActive() {
-        guard !isAnalyzing, !isRetryingCommentary,
-              let id = currentRecordID,
-              let record = store.record(for: id),
-              record.adviceUnavailableReason != nil else { return }
+        guard let id = currentRecordID else { return }
+        generateMissingAdvice(for: id)
+    }
 
-        isRetryingCommentary = true
+    /// 生成できなかった総評・シーン解説を作成する（結果を表示したときと、アプリに戻ったときに呼ぶ）
+    ///
+    /// Foundation Models はバックグラウンドでは生成が制限されるため、アプリが前面にあるときだけ行う。
+    func generateMissingAdvice(for id: UUID) {
+        guard !isAnalyzing, retryingRecordID == nil,
+              Self.isAppActive,
+              let record = store.record(for: id),
+              record.adviceUnavailableReason != nil,
+              IntelligenceAdvisor.unavailableReason == nil else { return }
+
+        retryingRecordID = id
         Task {
             await self.retryMissingAdvice(for: id)
-            self.isRetryingCommentary = false
+            self.retryingRecordID = nil
         }
+    }
+
+    /// アプリが前面にあるか（バックグラウンドでは AI 解説の生成が制限される）
+    private static var isAppActive: Bool {
+        UIApplication.shared.applicationState == .active
     }
 
     // MARK: - Pipeline
@@ -222,6 +257,8 @@ final class VideoAnalysisViewModel {
                 errorMessage = "解析を開始できませんでした"
                 isAnalyzing = false
                 phase = .idle
+                handedOverSession?.finish(success: false)
+                handedOverSession = nil
                 return
             }
             await runPipeline(checkpoint: checkpoint)
@@ -229,6 +266,8 @@ final class VideoAnalysisViewModel {
             errorMessage = "エラー: \(error.localizedDescription)"
             isAnalyzing = false
             phase = .idle
+            handedOverSession?.finish(success: false)
+            handedOverSession = nil
         }
     }
 
@@ -244,10 +283,17 @@ final class VideoAnalysisViewModel {
         livePreview = nil
         let startTime = Date()
 
-        let session = ContinuedProcessingSession { [weak self] in
-            self?.cancelAnalysis()
+        let session: ContinuedProcessingSession
+        if let handedOverSession {
+            session = handedOverSession
+            session.onExpire = { [weak self] in self?.cancelAnalysis() }
+            self.handedOverSession = nil
+        } else {
+            session = ContinuedProcessingSession { [weak self] in
+                self?.cancelAnalysis()
+            }
+            session.begin(title: "動画を解析中", subtitle: initialCheckpoint.videoFileName)
         }
-        session.begin(title: "動画を解析中", subtitle: initialCheckpoint.videoFileName)
         backgroundSession = session
 
         var checkpoint = initialCheckpoint
@@ -342,12 +388,19 @@ final class VideoAnalysisViewModel {
             )
 
             var adviceFailureReason: String? = IntelligenceAdvisor.unavailableReason
+            // バックグラウンドでは生成が制限されるため、一度制限されたら残りはアプリを開いたときに作る
+            var deferred = false
 
             if adviceFailureReason == nil {
-                do {
-                    record.advice = try await IntelligenceAdvisor.overallAdvice(for: record)
-                } catch {
-                    adviceFailureReason = IntelligenceAdvisor.errorMessage(for: error)
+                if Self.isAppActive {
+                    do {
+                        record.advice = try await IntelligenceAdvisor.overallAdvice(for: record)
+                    } catch {
+                        deferred = IntelligenceAdvisor.isRateLimited(error)
+                        adviceFailureReason = IntelligenceAdvisor.errorMessage(for: error)
+                    }
+                } else {
+                    adviceFailureReason = IntelligenceAdvisor.deferredMessage
                 }
             }
 
@@ -385,6 +438,10 @@ final class VideoAnalysisViewModel {
                     adviceFailureReason = IntelligenceAdvisor.unavailableReason
                     continue
                 }
+                guard !deferred, Self.isAppActive else {
+                    adviceFailureReason = IntelligenceAdvisor.deferredMessage
+                    continue
+                }
 
                 let segment = resolvedSegments[index]
                 let metrics = AnalysisMetrics(
@@ -402,6 +459,7 @@ final class VideoAnalysisViewModel {
                         usedRealModel: checkpoint.usedRealModel
                     )
                 } catch {
+                    deferred = IntelligenceAdvisor.isRateLimited(error)
                     adviceFailureReason = IntelligenceAdvisor.errorMessage(for: error)
                 }
 
@@ -434,6 +492,11 @@ final class VideoAnalysisViewModel {
         analysisTask = nil
         backgroundSession = nil
         processingCheckpointID = nil
+
+        // バックグラウンドで作れなかった AI 解説は、アプリが前面にあれば続けて作る
+        if currentRecordID == id {
+            generateMissingAdvice(for: id)
+        }
     }
 
     /// 未処理のフレームを検出する（画像生成・検出・OCR は TaskGroup で同時に数枚処理する）
@@ -522,7 +585,8 @@ final class VideoAnalysisViewModel {
                 }
             }
 
-            if let last = batchResults.last {
+            if let last = batchResults.last, Date().timeIntervalSince(livePreviewUpdatedAt) >= Self.previewInterval {
+                livePreviewUpdatedAt = Date()
                 livePreview = AnalysisLivePreview(
                     image: last.preview,
                     detections: last.frame.detections,
@@ -619,13 +683,29 @@ final class VideoAnalysisViewModel {
 
     private func retryMissingAdvice(for id: UUID) async {
         guard var record = store.record(for: id) else { return }
-        var failureReason: String? = IntelligenceAdvisor.unavailableReason
+        var failureReason: String?
 
-        if failureReason == nil, record.advice == nil {
+        /// 1件作るたびに保存して、画面に順に反映する
+        func save() {
+            if let latest = store.record(for: id) {
+                // 生成中に保存された選手のアドバイスを消さない
+                record.playerAdvice = latest.playerAdvice
+            }
+            try? store.update(record)
+        }
+
+        /// 生成できないときは理由を残して打ち切る
+        func generate(_ body: () async throws -> Void) async -> Bool {
+            guard Self.isAppActive else {
+                failureReason = IntelligenceAdvisor.deferredMessage
+                return false
+            }
             do {
-                record.advice = try await IntelligenceAdvisor.overallAdvice(for: record)
+                try await body()
+                return true
             } catch {
                 failureReason = IntelligenceAdvisor.errorMessage(for: error)
+                return !IntelligenceAdvisor.isRateLimited(error)
             }
         }
 
@@ -638,36 +718,39 @@ final class VideoAnalysisViewModel {
                     players: record.players
                 )
             }
-
-            for index in segments.indices where segments[index].commentary == nil {
-                guard IntelligenceAdvisor.unavailableReason == nil else {
-                    failureReason = IntelligenceAdvisor.unavailableReason
-                    break
-                }
-
-                let segment = segments[index]
-                let segmentFrames = record.frames.filter { segment.contains($0.timestamp) }
-                let metrics = AnalysisMetrics(
-                    frames: segmentFrames,
-                    duration: segment.endTime - segment.startTime,
-                    teams: record.teams,
-                    players: record.players
-                )
-                do {
-                    segments[index].commentary = try await IntelligenceAdvisor.sceneCommentary(
-                        for: segment,
-                        metrics: metrics,
-                        teams: record.teams,
-                        usedRealModel: record.usedRealModel
-                    )
-                } catch {
-                    failureReason = IntelligenceAdvisor.errorMessage(for: error)
-                }
-            }
             record.segments = segments
         }
 
-        record.adviceUnavailableReason = failureReason
-        try? store.update(record)
+        var canContinue = true
+        if record.advice == nil {
+            canContinue = await generate {
+                record.advice = try await IntelligenceAdvisor.overallAdvice(for: record)
+            }
+            save()
+        }
+
+        for index in (record.segments ?? []).indices where canContinue {
+            guard let segment = record.segments?[index], segment.commentary == nil else { continue }
+            let segmentFrames = record.frames.filter { segment.contains($0.timestamp) }
+            let metrics = AnalysisMetrics(
+                frames: segmentFrames,
+                duration: segment.endTime - segment.startTime,
+                teams: record.teams,
+                players: record.players
+            )
+            canContinue = await generate {
+                record.segments?[index].commentary = try await IntelligenceAdvisor.sceneCommentary(
+                    for: segment,
+                    metrics: metrics,
+                    teams: record.teams,
+                    usedRealModel: record.usedRealModel
+                )
+            }
+            save()
+        }
+
+        let missing = record.advice == nil || (record.segments ?? []).contains { $0.commentary == nil }
+        record.adviceUnavailableReason = missing ? (failureReason ?? IntelligenceAdvisor.deferredMessage) : nil
+        save()
     }
 }

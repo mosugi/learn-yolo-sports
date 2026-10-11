@@ -343,13 +343,23 @@ struct VideoAnalysisView: View {
         guard let item = item else { return }
         viewModel.errorMessage = nil
 
+        // 読み込み中にアプリを離れても止まらないよう、選んだ直後にバックグラウンド継続を申請する
+        let importer = importer
+        let session = viewModel.beginImportSession {
+            importer.cancel()
+        }
+
         do {
-            let movie = try await importer.load(item)
-            viewModel.startNewAnalysis(videoAt: movie.url)
+            let movie = try await importer.load(item) { fraction in
+                session.update(fraction: fraction, subtitle: "動画を読み込み中 \(Int(fraction * 100))%")
+            }
+            viewModel.startNewAnalysis(videoAt: movie.url, session: session)
         } catch is CancellationError {
             // ユーザーが読み込みをキャンセルした
+            session.finish(success: false)
         } catch {
             viewModel.errorMessage = "エラー: \(error.localizedDescription)"
+            session.finish(success: false)
         }
     }
 }

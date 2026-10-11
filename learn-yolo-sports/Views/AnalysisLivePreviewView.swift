@@ -30,8 +30,6 @@ struct AnalysisLivePreviewView: View {
                             )
                         }
                     }
-                    .id(preview.timestamp)
-                    .transition(.opacity)
 
                 caption(for: preview)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -41,7 +39,6 @@ struct AnalysisLivePreviewView: View {
                     .tint(.white)
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: preview?.timestamp)
     }
 
     private func caption(for preview: AnalysisLivePreview) -> some View {

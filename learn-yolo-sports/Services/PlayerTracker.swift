@@ -126,8 +126,17 @@ nonisolated enum PlayerTracker {
                     palette: detection.jerseyPalette ?? [],
                     isGoalkeeper: sportsClass == .goalkeeper,
                     isReferee: sportsClass == .referee,
-                    jerseyNumber: detection.jerseyNumber
+                    jerseyNumber: detection.jerseyNumber,
+                    touchesBottom: Double(detection.boundingBox.maxY) >= bottomEdge
                 ))
+            }
+            // 同じフレームに写る人の身長の中央値と比べた大きさ（手前に立つ人を見分けるため）
+            if list.count >= 3 {
+                let sorted = list.map(\.height).sorted()
+                let median = sorted[sorted.count / 2]
+                for index in list.indices {
+                    list[index].relativeHeight = list[index].height / median
+                }
             }
             observations.append(list)
         }
@@ -162,13 +171,37 @@ nonisolated enum PlayerTracker {
         }
 
         var stationary: [Int: Set<Int>] = [:]
-        for index in stationaryTracks(tracks) {
+        for index in Set(stationaryTracks(tracks)).union(foregroundTracks(tracks, observations: observations)) {
             for point in tracks[index].points {
                 stationary[point.frame, default: []].insert(observations[point.frame][point.observation].detectionIndex)
             }
         }
 
         return (PlayerTrackingResult(assignments: assignments, teams: classified?.teams, players: players), stationary)
+    }
+
+    // MARK: - Foreground people
+
+    /// 枠の下端がこれより下なら、足元が画面の下で切れているとみなす
+    static let bottomEdge = 0.97
+    /// 同じフレームの人の中央値に対して、これ以上大きければカメラのすぐ前にいるとみなす
+    static let foregroundHeightRatio = 1.8
+
+    /// カメラのすぐ前（タッチラインの外）に立つ人の追跡
+    ///
+    /// 足元が画面の下で切れている人は床の色でコート内かを判定できず、カメラの動きを打ち消しても
+    /// 枠の下端が画面の端に張り付くため、止まっていても動いて見える。
+    /// 足元が切れていて、かつ周りの人よりはっきり大きく写る観測が過半数の追跡をコート外とみなす。
+    static func foregroundTracks(_ tracks: [Track], observations: [[Observation]]) -> [Int] {
+        tracks.indices.filter { index in
+            let points = tracks[index].points
+            guard points.count >= 3, !tracks[index].isGoalkeeper else { return false }
+            let foreground = points.filter { point in
+                let observation = observations[point.frame][point.observation]
+                return observation.touchesBottom && observation.relativeHeight >= foregroundHeightRatio
+            }.count
+            return foreground * 2 > points.count
+        }
     }
 
     // MARK: - Stationary people
@@ -378,6 +411,10 @@ nonisolated enum PlayerTracker {
         let isGoalkeeper: Bool
         let isReferee: Bool
         let jerseyNumber: Int?
+        /// 足元が画面の下で切れているか
+        let touchesBottom: Bool
+        /// 同じフレームに写る人の身長の中央値に対する大きさ
+        var relativeHeight = 1.0
 
         /// 代表色（チームの代表色の計算に使う）。平均すると赤がピンク、白が灰色に寄るため、最も広い色を使う
         var color: LabColor? {
