@@ -78,14 +78,19 @@ nonisolated enum PlayerTracker {
     /// 色が食い違う観測を対応付けるときに足す距離（身長単位）
     static let colorConflictPenalty = 1.5
     /// 追跡・識別の方式の版。変えたときは上げる（保存済みの検出結果から識別をやり直す目安になる）
-    static let version = 3
+    static let version = 4
 
     /// 前回の追跡・識別の結果を外してから、追跡・識別をやり直してフレームに書き込む
-    static func retrack(frames: inout [SavedFrame], aspectRatio: Double, playersPerTeam: Int) -> PlayerTrackingResult {
+    static func retrack(
+        frames: inout [SavedFrame],
+        aspectRatio: Double,
+        playersPerTeam: Int,
+        appearances: AppearanceExtractor.Features = [:]
+    ) -> PlayerTrackingResult {
         for index in frames.indices {
             frames[index].detections = frames[index].detections.map { $0.clearingTracking() }
         }
-        let result = analyze(frames: frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
+        let result = analyze(frames: frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
         result.apply(to: &frames)
         return result
     }
@@ -99,16 +104,22 @@ nonisolated enum PlayerTracker {
     ///   - frames: 時刻順のフレーム（検出は正規化座標）
     ///   - aspectRatio: 画像の幅 / 高さ
     ///   - playersPerTeam: 1チームの人数（GK を含む。8人制なら 8）。識別する選手の数の上限になる
-    static func analyze(frames: [SavedFrame], aspectRatio: Double, playersPerTeam: Int = defaultPlayersPerTeam) -> PlayerTrackingResult {
+    ///   - appearances: 選手の見た目の特徴（AppearanceExtractor）。画面外に出て戻った選手を結ぶときに使う
+    static func analyze(
+        frames: [SavedFrame],
+        aspectRatio: Double,
+        playersPerTeam: Int = defaultPlayersPerTeam,
+        appearances: AppearanceExtractor.Features = [:]
+    ) -> PlayerTrackingResult {
         let aspect = aspectRatio > 0 ? aspectRatio : 16.0 / 9.0
         let fieldSlots = max(1, playersPerTeam - 1)
 
         // 白線の外も芝が続く会場では、床の色だけでは観客や控えの選手を除けない。
         // 一度全員で追跡し、周りが動いているのに動かない人を見つけたら、その人を除いて
         // チームの色・追跡・呼び名を求め直す（観客の服の色がチームの色に混ざらないように）
-        let first = analyze(frames: frames, aspect: aspect, fieldSlots: fieldSlots, excluded: [:])
+        let first = analyze(frames: frames, aspect: aspect, fieldSlots: fieldSlots, appearances: appearances, excluded: [:])
         guard !first.stationary.isEmpty else { return first.result }
-        var result = analyze(frames: frames, aspect: aspect, fieldSlots: fieldSlots, excluded: first.stationary).result
+        var result = analyze(frames: frames, aspect: aspect, fieldSlots: fieldSlots, appearances: appearances, excluded: first.stationary).result
         result.excluded = first.stationary
         return result
     }
@@ -119,6 +130,7 @@ nonisolated enum PlayerTracker {
         frames: [SavedFrame],
         aspect: Double,
         fieldSlots: Int,
+        appearances: AppearanceExtractor.Features,
         excluded: [Int: Set<Int>]
     ) -> (result: PlayerTrackingResult, stationary: [Int: Set<Int>]) {
         // 1. 人の観測を集める（コート外は除く）。画面が切り替わったら区間を分ける
@@ -144,7 +156,8 @@ nonisolated enum PlayerTracker {
                     isGoalkeeper: sportsClass == .goalkeeper,
                     isReferee: sportsClass == .referee,
                     jerseyNumber: detection.jerseyNumber,
-                    touchesBottom: Double(detection.boundingBox.maxY) >= bottomEdge
+                    touchesBottom: Double(detection.boundingBox.maxY) >= bottomEdge,
+                    appearance: appearances[index]?[detectionIndex]
                 ))
             }
             // 同じフレームに写る人の身長の中央値と比べた大きさ（手前に立つ人を見分けるため）
@@ -295,8 +308,15 @@ nonisolated enum PlayerTracker {
 
     // MARK: - Identity
 
+    /// 位置と見た目の費用の合計。1 以下ずつなら無理がない（見た目の特徴がなければ見た目は 1 とみなす）
     /// 新しい選手の枠を使う代わりに、既存の枠へつなぐときの費用の上限
-    static let newSlotCost = 1.0
+    static let newSlotCost = 2.0
+    /// これより費用が大きい枠には入れない。無理につなぐと別の人に切り替わるため、呼び名を付けずにおく
+    static let maxLinkCost = 2.8
+    /// 見た目の距離の目安（単位ベクトルの距離。これ以下ならよく似ている）
+    static let appearanceScale = 0.6
+    /// 途切れた追跡を直後につなぎ直すときの、見た目の距離の上限
+    static let stitchAppearanceLimit = 1.0
 
     /// 追跡を選手に割り当てる
     ///
@@ -325,6 +345,14 @@ nonisolated enum PlayerTracker {
             return distance(a.last.position, b.first.position, height: height) / reach + gap / 120
         }
         /// 背番号の票をまとめて、過半数を占める背番号（2回以上読めたもの）
+        /// 枠の見た目（追跡の特徴の平均）
+        func appearance(of members: [Track]) -> [Float]? {
+            var total = Track(id: -1, points: [])
+            for member in members {
+                total.addAppearance(sum: member.appearanceSum, count: member.appearanceCount)
+            }
+            return total.appearance
+        }
         func number(of members: [Track]) -> (number: Int, votes: Int)? {
             var votes: [Int: Int] = [:]
             for member in members { votes.merge(member.numberVotes, uniquingKeysWith: +) }
@@ -354,19 +382,25 @@ nonisolated enum PlayerTracker {
                     let next = members.first { $0.first.time > track.last.time }
                     var cost = [previous.map { linkCost(from: $0, to: track) }, next.map { linkCost(from: track, to: $0) }]
                         .compactMap { $0 }
-                        .min() ?? newSlotCost
-                    if let slotNumber, slotNumber == track.jerseyNumber { cost -= 1 }
+                        .min() ?? 1
+                    if let own = track.appearance, let slot = appearance(of: members) {
+                        cost += AppearanceExtractor.distance(own, slot) / appearanceScale
+                    } else {
+                        cost += 1
+                    }
+                    if let slotNumber, slotNumber == track.jerseyNumber { cost -= 1.5 }
                     if best == nil || cost < best!.cost { best = (index, cost) }
                 }
 
                 if slots.count < fieldSlots, best == nil || best!.cost > newSlotCost {
                     slots.append([track])
-                } else if let best {
+                } else if let best, best.cost <= maxLinkCost {
                     slots[best.slot].append(track)
                     slots[best.slot].sort { $0.first.time < $1.first.time }
-                } else {
+                } else if best == nil {
                     extraTracks.append(track.id)
                 }
+                // どの枠とも無理なくつながらない追跡は、呼び名を付けずチームの色だけで表示する
             }
             slotsByTeam[team] = slots
         }
@@ -498,6 +532,8 @@ nonisolated enum PlayerTracker {
         let jerseyNumber: Int?
         /// 足元が画面の下で切れているか
         let touchesBottom: Bool
+        /// 見た目の特徴（保存画像のあるフレームのうち、大きく写った選手だけ）
+        let appearance: [Float]?
         /// 同じフレームに写る人の身長の中央値に対する大きさ
         var relativeHeight = 1.0
 
@@ -541,6 +577,25 @@ nonisolated enum PlayerTracker {
         var refereeCount = 0
         var goalkeeperCount = 0
         var numberVotes: [Int: Int] = [:]
+        /// 見た目の特徴の合計と数（平均をこの追跡の見た目とする）
+        var appearanceSum: [Float]?
+        var appearanceCount = 0
+
+        /// この追跡の見た目（単位長さ。特徴がなければ nil）
+        var appearance: [Float]? {
+            appearanceSum.flatMap(AppearanceExtractor.normalized)
+        }
+
+        /// 見た目の特徴を足し合わせる
+        mutating func addAppearance(sum: [Float]?, count: Int) {
+            guard let sum, count > 0 else { return }
+            if let current = appearanceSum, current.count == sum.count {
+                appearanceSum = zip(current, sum).map { $0 + $1 }
+            } else if appearanceSum == nil {
+                appearanceSum = sum
+            }
+            appearanceCount += count
+        }
         var team: Int?
 
         var first: TrackPoint { points[0] }
@@ -576,6 +631,7 @@ nonisolated enum PlayerTracker {
         /// 観測を1つ加え、チーム・GK・背番号の票を数える
         mutating func add(_ point: TrackPoint, observation: Observation, vote: TeamVote?) {
             points.append(point)
+            addAppearance(sum: observation.appearance, count: observation.appearance == nil ? 0 : 1)
             if observation.isGoalkeeper {
                 goalkeeperCount += 1
             } else if observation.isReferee {
@@ -719,7 +775,14 @@ nonisolated enum PlayerTracker {
                 if let x = earlier.jerseyNumber, let y = later.jerseyNumber, x != y { continue }
                 if earlier.isGoalkeeper != later.isGoalkeeper { continue }
                 if earlier.isReferee != later.isReferee { continue }
-                links.append((a, b, d))
+                // 見た目がはっきり違うものはつながない
+                var cost = d
+                if let x = earlier.appearance, let y = later.appearance {
+                    let appearance = AppearanceExtractor.distance(x, y)
+                    guard appearance <= stitchAppearanceLimit else { continue }
+                    cost += appearance / appearanceScale
+                }
+                links.append((a, b, cost))
             }
         }
         links.sort { $0.distance < $1.distance }
@@ -744,6 +807,7 @@ nonisolated enum PlayerTracker {
                 track.refereeCount += part.refereeCount
                 track.goalkeeperCount += part.goalkeeperCount
                 track.numberVotes.merge(part.numberVotes, uniquingKeysWith: +)
+                track.addAppearance(sum: part.appearanceSum, count: part.appearanceCount)
                 current = next[index]
             }
             merged.append(track)
