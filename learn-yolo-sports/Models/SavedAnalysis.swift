@@ -119,7 +119,8 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     var processingDuration: Double
     /// false の場合はモックモードの結果
     let usedRealModel: Bool
-    let frames: [SavedFrame]
+    /// 選手の識別をやり直すと、チーム・追跡・選手の割り当てが書き換わる
+    var frames: [SavedFrame]
     /// 生成済みのアドバイス（全体総評）
     var advice: AnalysisAdvice? = nil
     /// 動画の長さ（秒）。動画ファイルが保存されている場合のみ再生に使う
@@ -136,6 +137,8 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     var adviceUnavailableReason: String? = nil
     /// 選手ごとのアドバイス（指定された選手の分だけ）
     var playerAdvice: [PlayerAdvice]? = nil
+    /// 選手の識別に使った1チームの人数（古い記録は nil）
+    var playersPerTeam: Int? = nil
 
     // MARK: - 集計
     

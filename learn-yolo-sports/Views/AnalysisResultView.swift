@@ -15,6 +15,7 @@ import UIKit
 /// タイムラインやチャプターをタップすると、そのシーンへシークして再生する。
 struct AnalysisResultView: View {
     @Environment(AnalysisStore.self) private var store
+    @Environment(VideoAnalysisViewModel.self) private var viewModel
     let record: SavedAnalysis
 
     @State private var player = AVPlayer()
@@ -62,6 +63,13 @@ struct AnalysisResultView: View {
                             timelineBar(duration: duration)
                                 .padding(.horizontal)
                         }
+                        if focusPath == nil, record.players?.isEmpty == false {
+                            Label("選手の枠をタップすると、その選手を追いかけて動きのアドバイスを作成します", systemImage: "hand.tap")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal)
+                        }
                     } else {
                         legacyFrameBrowser
                     }
@@ -94,6 +102,10 @@ struct AnalysisResultView: View {
             }
         }
         .onAppear { setupPlayerIfNeeded() }
+        // バックグラウンドで作れなかった AI 解説を、表示したときに作る
+        .task(id: record.id) {
+            viewModel.generateMissingAdvice(for: record.id)
+        }
         .onDisappear { teardownPlayer() }
     }
 
@@ -109,9 +121,9 @@ struct AnalysisResultView: View {
                         teams: record.teams,
                         players: record.players,
                         displaySize: geo.size,
-                        focusedPlayerID: focusPath?.playerID
+                        focusedPlayerID: focusPath?.playerID,
+                        onSelectPlayer: toggleFocus(playerID:)
                     )
-                    .allowsHitTesting(false)
                 }
                 // 選んだ選手のマーカーは、枠の表示を消していても出す
                 if let focusPath, let focusedPlayer {
@@ -171,6 +183,11 @@ struct AnalysisResultView: View {
     }
 
     /// 選手のマーカーを付ける・外す。今の場面に写っていなければ、次に写る場面へ移動する
+    private func toggleFocus(playerID: Int) {
+        guard let target = record.player(id: playerID) else { return }
+        toggleFocus(target)
+    }
+
     private func toggleFocus(_ target: PlayerIdentity) {
         if focusPath?.playerID == target.id {
             focusPath = nil
@@ -273,9 +290,18 @@ struct AnalysisResultView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text(record.adviceUnavailableReason ?? "この場面のAI解説はまだありません")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if viewModel.retryingRecordID == record.id {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("AI解説を作成中...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text(record.adviceUnavailableReason ?? "この場面のAI解説はまだありません")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 if let tactics = segment.tactics, !tactics.options.isEmpty {
@@ -335,12 +361,49 @@ struct AnalysisResultView: View {
                 Text("背番号が読めた選手は #番号、読めなかった選手は登場順に A, B, C… で呼んでいます。タップするとその選手にマーカーを付け続け、動きへのアドバイスを作成します（もう一度タップで解除）。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+
+                reidentifyMenu
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
             .background(Color(.secondarySystemBackground))
             .cornerRadius(12)
             .padding(.horizontal)
+        }
+    }
+
+    /// 1チームの人数を指定して選手の識別だけをやり直す（検出はやり直さないためすぐ終わる）
+    @ViewBuilder
+    private var reidentifyMenu: some View {
+        if viewModel.reidentifyingRecordID == record.id {
+            HStack(spacing: 8) {
+                ProgressView()
+                Text("選手の識別をやり直しています...")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Menu {
+                ForEach(AnalysisSettings.playersPerTeamOptions, id: \.self) { count in
+                    Button {
+                        focusPath = nil
+                        viewModel.reidentifyPlayers(recordID: record.id, playersPerTeam: count)
+                    } label: {
+                        if record.playersPerTeam == count {
+                            Label(AnalysisSettings.label(forPlayersPerTeam: count), systemImage: "checkmark")
+                        } else {
+                            Text(AnalysisSettings.label(forPlayersPerTeam: count))
+                        }
+                    }
+                }
+            } label: {
+                Label(
+                    record.playersPerTeam.map { "\(AnalysisSettings.label(forPlayersPerTeam: $0))で識別済み・人数を変えて識別し直す" }
+                        ?? "1チームの人数を指定して識別し直す",
+                    systemImage: "person.2.badge.gearshape"
+                )
+                .font(.caption)
+            }
         }
     }
 
@@ -522,7 +585,8 @@ struct AnalysisResultView: View {
                             teams: record.teams,
                             players: record.players,
                             displaySize: geo.size,
-                            focusedPlayerID: focusPath?.playerID
+                            focusedPlayerID: focusPath?.playerID,
+                            onSelectPlayer: toggleFocus(playerID:)
                         )
                         if let focusPath, let focusedPlayer {
                             PlayerFocusMarker(path: focusPath, label: focusedPlayer.label, displaySize: geo.size) {

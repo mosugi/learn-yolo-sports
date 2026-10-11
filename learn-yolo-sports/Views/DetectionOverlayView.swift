@@ -18,6 +18,8 @@ struct DetectionOverlayView: View {
     var compact = false
     /// 注目している選手。その選手の枠は PlayerFocusMarker が描くため除き、他の人は控えめに描く
     var focusedPlayerID: Int? = nil
+    /// 指定すると、識別した選手の枠をタップしてその選手を選べるようにする（他の部分のタップは下の動画へ通す）
+    var onSelectPlayer: ((Int) -> Void)? = nil
 
     private var visibleDetections: [SavedDetection] {
         guard let focusedPlayerID else { return detections }
@@ -54,10 +56,28 @@ struct DetectionOverlayView: View {
                     }
                 }
                 .frame(width: max(0, box.width), height: max(0, box.height))
+                .modifier(PlayerTapModifier(playerID: detection.isExcluded ? nil : detection.playerID, onSelect: onSelectPlayer))
                 .position(x: box.midX, y: box.midY)
             }
         }
         .opacity(focusedPlayerID == nil ? 1 : 0.5)
+    }
+
+    /// 選手の枠だけをタップできるようにする
+    private struct PlayerTapModifier: ViewModifier {
+        let playerID: Int?
+        let onSelect: ((Int) -> Void)?
+
+        func body(content: Content) -> some View {
+            if let playerID, let onSelect {
+                content
+                    .contentShape(Rectangle())
+                    .onTapGesture { onSelect(playerID) }
+                    .accessibilityAddTraits(.isButton)
+            } else {
+                content.allowsHitTesting(false)
+            }
+        }
     }
 
     private func overlayColor(for detection: SavedDetection) -> Color {

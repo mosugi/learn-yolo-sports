@@ -134,10 +134,24 @@ nonisolated enum IntelligenceAdvisor {
         )
     }
 
+    /// バックグラウンドでは生成が制限されるため、アプリを開いたときに作成することを伝える
+    static let deferredMessage = "アプリがバックグラウンドの間は AI 解説を作成できないため、アプリを開いたときに作成します。"
+
+    /// バックグラウンドで実行したために生成が制限されたか
+    static func isRateLimited(_ error: Error) -> Bool {
+        if let generationError = error as? LanguageModelSession.GenerationError,
+           case .rateLimited = generationError {
+            return true
+        }
+        return false
+    }
+
     /// エラーを表示用の日本語メッセージに変換する
     static func errorMessage(for error: Error) -> String {
         if let generationError = error as? LanguageModelSession.GenerationError {
             switch generationError {
+            case .rateLimited:
+                return deferredMessage
             case .exceededContextWindowSize:
                 return "入力が長すぎるため生成できませんでした。"
             case .guardrailViolation:
