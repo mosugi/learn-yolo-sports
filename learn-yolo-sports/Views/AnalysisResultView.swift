@@ -21,6 +21,8 @@ struct AnalysisResultView: View {
     @State private var currentTime: Double = 0
     @State private var showOverlay = true
     @State private var timeObserver: Any?
+    /// マーカーを付け続ける選手の位置
+    @State private var focusPath: PlayerFocusPath?
 
     // 動画ファイルがない古い記録向けのフレーム静止画表示
     @State private var selectedFrameIndex = 0
@@ -33,6 +35,10 @@ struct AnalysisResultView: View {
     private var videoAspectRatio: CGFloat {
         guard record.imageWidth > 0, record.imageHeight > 0 else { return 16.0 / 9.0 }
         return CGFloat(record.imageWidth) / CGFloat(record.imageHeight)
+    }
+
+    private var focusedPlayer: PlayerIdentity? {
+        focusPath.flatMap { path in record.players?.first { $0.id == path.playerID } }
     }
 
     private var currentSegment: SceneSegment? {
@@ -92,8 +98,21 @@ struct AnalysisResultView: View {
             ZStack {
                 VideoPlayer(player: player)
                 if showOverlay, let frame = nearestFrame(to: currentTime) {
-                    DetectionOverlayView(detections: frame.detections, teams: record.teams, players: record.players, displaySize: geo.size)
-                        .allowsHitTesting(false)
+                    DetectionOverlayView(
+                        detections: frame.detections,
+                        teams: record.teams,
+                        players: record.players,
+                        displaySize: geo.size,
+                        focusedPlayerID: focusPath?.playerID
+                    )
+                    .allowsHitTesting(false)
+                }
+                // 選んだ選手のマーカーは、枠の表示を消していても出す
+                if let focusPath, let focusedPlayer {
+                    PlayerFocusMarker(path: focusPath, label: focusedPlayer.label, displaySize: geo.size) {
+                        let seconds = CMTimeGetSeconds(player.currentTime())
+                        return seconds.isFinite ? seconds : 0
+                    }
                 }
                 // 注目時点の前後では選択肢の矢印も重ねる
                 if showOverlay, let segment = currentSegment, let tactics = segment.tactics,
@@ -116,6 +135,46 @@ struct AnalysisResultView: View {
                     .clipShape(Circle())
             }
             .padding(8)
+        }
+        .overlay(alignment: .topLeading) {
+            focusBadge
+        }
+    }
+
+    /// マーカーを付けている選手と、解除ボタン
+    @ViewBuilder
+    private var focusBadge: some View {
+        if let focusedPlayer {
+            Button {
+                focusPath = nil
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "scope")
+                    Text("\(focusedPlayer.displayName(teams: record.teams)) を追跡中")
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .font(.caption.bold())
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.yellow, in: Capsule())
+                .foregroundStyle(.black)
+            }
+            .padding(8)
+            .accessibilityLabel("\(focusedPlayer.displayName(teams: record.teams)) の追跡を解除")
+        }
+    }
+
+    /// 選手のマーカーを付ける・外す。今の場面に写っていなければ、次に写る場面へ移動する
+    private func toggleFocus(_ target: PlayerIdentity) {
+        if focusPath?.playerID == target.id {
+            focusPath = nil
+            return
+        }
+        let path = PlayerFocusPath(frames: record.frames, playerID: target.id)
+        guard !path.isEmpty else { return }
+        focusPath = path
+        if path.box(at: currentTime) == nil, let time = path.nextAppearance(after: currentTime) {
+            jump(to: time)
         }
     }
 
@@ -234,7 +293,7 @@ struct AnalysisResultView: View {
 
     // MARK: - Players
 
-    /// チームと識別した選手（タップするとその選手が最初に写った場面へ移動する）
+    /// チームと識別した選手（タップするとその選手にマーカーを付け続ける）
     @ViewBuilder
     private var playersSection: some View {
         if let teams = record.teams, !teams.isEmpty {
@@ -267,7 +326,7 @@ struct AnalysisResultView: View {
                     playerChips(goalkeepers, color: .green)
                 }
 
-                Text("背番号が読めた選手は #番号、読めなかった選手は登場順に A, B, C… で呼んでいます。")
+                Text("背番号が読めた選手は #番号、読めなかった選手は登場順に A, B, C… で呼んでいます。タップするとその選手にマーカーを付け続けます（もう一度タップで解除）。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -283,19 +342,26 @@ struct AnalysisResultView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(players) { player in
+                    let isFocused = focusPath?.playerID == player.id
                     Button {
-                        jump(to: player.firstSeen)
+                        toggleFocus(player)
                     } label: {
-                        Text(player.label)
-                            .font(.caption.bold())
-                            .monospacedDigit()
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(color.opacity(0.2)))
-                            .overlay(Capsule().strokeBorder(color, lineWidth: 1))
-                            .foregroundStyle(.primary)
+                        HStack(spacing: 3) {
+                            if isFocused {
+                                Image(systemName: "scope")
+                            }
+                            Text(player.label)
+                                .monospacedDigit()
+                        }
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(isFocused ? Color.yellow : color.opacity(0.2)))
+                        .overlay(Capsule().strokeBorder(isFocused ? Color.yellow : color, lineWidth: 1))
+                        .foregroundStyle(isFocused ? Color.black : Color.primary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(isFocused ? .isSelected : [])
                 }
             }
         }
@@ -444,18 +510,28 @@ struct AnalysisResultView: View {
                         ProgressView()
                     }
                     if legacyFrames.indices.contains(selectedFrameIndex) {
+                        let frame = legacyFrames[selectedFrameIndex]
                         DetectionOverlayView(
-                            detections: legacyFrames[selectedFrameIndex].detections,
+                            detections: frame.detections,
                             teams: record.teams,
                             players: record.players,
-                            displaySize: geo.size
+                            displaySize: geo.size,
+                            focusedPlayerID: focusPath?.playerID
                         )
+                        if let focusPath, let focusedPlayer {
+                            PlayerFocusMarker(path: focusPath, label: focusedPlayer.label, displaySize: geo.size) {
+                                frame.timestamp
+                            }
+                        }
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
             }
             .aspectRatio(videoAspectRatio, contentMode: .fit)
             .background(Color.black)
+            .overlay(alignment: .topLeading) {
+                focusBadge
+            }
 
             if legacyFrames.count > 1 {
                 Slider(

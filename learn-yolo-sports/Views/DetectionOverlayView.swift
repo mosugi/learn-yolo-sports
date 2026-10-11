@@ -16,10 +16,18 @@ struct DetectionOverlayView: View {
     let displaySize: CGSize
     /// 小さな表示向け（細い枠・ラベルなし）
     var compact = false
+    /// 注目している選手。その選手の枠は PlayerFocusMarker が描くため除き、他の人は控えめに描く
+    var focusedPlayerID: Int? = nil
+
+    private var visibleDetections: [SavedDetection] {
+        guard let focusedPlayerID else { return detections }
+        return detections.filter { $0.playerID != focusedPlayerID }
+    }
 
     var body: some View {
+        let isCompact = compact || focusedPlayerID != nil
         ZStack {
-            ForEach(Array(detections.enumerated()), id: \.offset) { _, detection in
+            ForEach(Array(visibleDetections.enumerated()), id: \.offset) { _, detection in
                 let box = CGRect(
                     x: detection.boundingBox.minX * displaySize.width,
                     y: detection.boundingBox.minY * displaySize.height,
@@ -30,10 +38,10 @@ struct DetectionOverlayView: View {
 
                 ZStack(alignment: .topLeading) {
                     Rectangle()
-                        .strokeBorder(color, lineWidth: compact || detection.isExcluded ? 1.5 : 3)
+                        .strokeBorder(color, lineWidth: isCompact || detection.isExcluded ? 1.5 : 3)
                         .background(color.opacity(0.1))
 
-                    if !compact && !detection.isExcluded {
+                    if !isCompact && !detection.isExcluded {
                         Text(label(for: detection))
                             .font(.caption2)
                             .fontWeight(.bold)
@@ -49,6 +57,7 @@ struct DetectionOverlayView: View {
                 .position(x: box.midX, y: box.midY)
             }
         }
+        .opacity(focusedPlayerID == nil ? 1 : 0.5)
     }
 
     private func overlayColor(for detection: SavedDetection) -> Color {
