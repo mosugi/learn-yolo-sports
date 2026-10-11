@@ -97,6 +97,11 @@ struct VideoAnalysisView: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
+
+                    Label("サイドライン側から横向きで撮影し、ゴールが画面の左右にある動画に対応しています。ゴール裏から撮った動画には対応していません。", systemImage: "rectangle.landscape.rotate")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 40)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {

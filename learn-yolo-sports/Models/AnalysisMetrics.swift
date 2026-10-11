@@ -131,9 +131,9 @@ nonisolated struct AnalysisMetrics {
         lines.append("- 解析フレーム数: \(frameCount)（\(String(format: "%.1f", coveredDuration)) 秒分）")
         lines.append("- 1フレームあたりの平均選手数: \(String(format: "%.1f", averagePlayers)) 人")
         if let teams, !teams.isEmpty {
+            // チームごとの写っていた人数はカメラの向きで偏るだけなので渡さない（人数の差と誤解されるため）
             for team in teams {
-                let average = averagePlayersByTeam[team.id] ?? 0
-                var line = "- \(team.name)（\(ColorNaming.japaneseName(for: team.color))系ユニフォーム）の平均人数: \(String(format: "%.1f", average)) 人"
+                var line = "- \(team.name)（\(ColorNaming.japaneseName(for: team.color))系ユニフォーム）"
                 // オンデバイス LLM のコンテキストに収まるよう、背番号の分かる選手だけ挙げて残りは人数にする
                 if let labels = playerLabelsByTeam[team.id], !labels.isEmpty {
                     let numbered = labels.filter { $0.hasPrefix("#") }

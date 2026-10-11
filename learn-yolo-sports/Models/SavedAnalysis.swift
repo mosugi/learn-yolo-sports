@@ -163,6 +163,8 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     var detectionVersion: String? = nil
     /// 選手の追跡・識別の方式。変わっていれば識別をやり直す
     var trackingVersion: Int? = nil
+    /// AI の文章を作ったときの指示文の版。変わっていれば作り直す
+    var adviceVersion: Int? = nil
 
     // MARK: - 集計
     
