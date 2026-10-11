@@ -14,25 +14,57 @@ nonisolated struct SavedDetection: Codable, Hashable {
     let confidence: Float
     /// 画像に対する正規化座標（0〜1、左上原点）
     let boundingBox: CGRect
-    /// 足元のピッチ座標（m）。コート設定がない場合は nil
-    var pitchPosition: CGPoint? = nil
-    /// 対象コート内か（nil はコート設定なし）
+    /// ユニフォームの胴体部分の色（選手・GK・審判のみ。割合の大きい順に最大3色）
+    var jerseyPalette: [WeightedColor]? = nil
+    /// コートの床の上に立っているか（nil は判定できなかった）
     var inCourt: Bool? = nil
-    /// 所属チーム（判定できなかった場合は nil）
-    var team: TeamSide? = nil
+    /// チーム（TeamInfo.id。判定できなかった場合は nil）
+    var team: Int? = nil
     /// 追跡 ID
     var trackID: Int? = nil
+    /// 識別した選手（PlayerIdentity.id）
+    var playerID: Int? = nil
     /// このフレームで読み取れた背番号
     var jerseyNumber: Int? = nil
-    
-    /// 解析対象から外した検出（対象コート外）か
+
+    /// 解析対象から外した検出（コート外）か
     var isExcluded: Bool {
         inCourt == false
     }
-    
+
     /// バウンディングボックスの中心（正規化座標）
     var center: CGPoint {
         CGPoint(x: boundingBox.midX, y: boundingBox.midY)
+    }
+
+    /// 足元（枠の下端の中央、正規化座標）
+    var footPoint: CGPoint {
+        CGPoint(x: boundingBox.midX, y: boundingBox.maxY)
+    }
+
+    /// 信頼度を百分率で取得
+    var confidencePercentage: Int {
+        Int(confidence * 100)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case label, confidence, boundingBox, jerseyPalette, inCourt, team, trackID, playerID, jerseyNumber
+    }
+}
+
+extension SavedDetection {
+    /// 以前の形式（チームを "own" / "opponent" で保存していたもの）も読めるようにする
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decode(String.self, forKey: .label)
+        confidence = try container.decode(Float.self, forKey: .confidence)
+        boundingBox = try container.decode(CGRect.self, forKey: .boundingBox)
+        jerseyPalette = try? container.decodeIfPresent([WeightedColor].self, forKey: .jerseyPalette)
+        inCourt = try? container.decodeIfPresent(Bool.self, forKey: .inCourt)
+        team = try? container.decodeIfPresent(Int.self, forKey: .team)
+        trackID = try? container.decodeIfPresent(Int.self, forKey: .trackID)
+        playerID = try? container.decodeIfPresent(Int.self, forKey: .playerID)
+        jerseyNumber = try? container.decodeIfPresent(Int.self, forKey: .jerseyNumber)
     }
 }
 
@@ -41,19 +73,17 @@ nonisolated struct SavedFrame: Codable, Hashable, Identifiable {
     let frameNumber: Int
     /// 動画先頭からの時刻（秒）
     let timestamp: Double
-    /// 解析ディレクトリ内の画像ファイル名
+    /// 解析ディレクトリ内の画像ファイル名（数フレームおきにだけ保存する）
     let imageFileName: String?
-    let detections: [SavedDetection]
-    /// 自チームから見た局面（コート設定がある場合）
-    var phase: GamePhase? = nil
-    /// ボール保持チーム
-    var possession: TeamSide? = nil
-    /// ボールのピッチ座標（短い欠損は補間済み）
-    var ball: CGPoint? = nil
-    
+    var detections: [SavedDetection]
+    /// 最初のフレームから見たカメラの累積の移動量（正規化座標）。画面上の位置に足すと動画全体で共通の位置になる
+    var cameraOffset: CGPoint? = nil
+    /// 直前のフレームから画面が切り替わった（大きく動いた・リプレイなど）か
+    var sceneCut: Bool? = nil
+
     var id: Int { frameNumber }
-    
-    /// 指定したクラスの検出（対象コート外のものは除く）
+
+    /// 指定したクラスの検出（コート外のものは除く）
     func detections(of sportsClass: SportsClass) -> [SavedDetection] {
         detections.filter { $0.label == sportsClass.rawValue && !$0.isExcluded }
     }
@@ -65,8 +95,6 @@ nonisolated struct AnalysisAdvice: Codable, Hashable {
     let observations: [String]
     let suggestions: [String]
     let generatedAt: Date
-    /// 背番号ごとのアドバイス（例: #10: 〜）
-    var playerAdvice: [String]? = nil
 }
 
 /// 保存された解析結果
@@ -78,53 +106,25 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     let imageWidth: Int
     let imageHeight: Int
     /// 解析にかかった時間（秒）
-    let processingDuration: Double
+    var processingDuration: Double
     /// false の場合はモックモードの結果
     let usedRealModel: Bool
     let frames: [SavedFrame]
-    /// 生成済みのアドバイス
+    /// 生成済みのアドバイス（全体総評）
     var advice: AnalysisAdvice? = nil
-    /// コート・チームの設定（未設定で解析した場合は nil）
-    var setup: AnalysisSetup? = nil
-    /// ルールベースのコーチ解説（コート設定がある場合のみ）
-    var coachReport: CoachReport? = nil
-    /// 得点シーンなどのチャプター
-    var chapters: [MatchChapter]? = nil
-    /// 背番号の読み取りから推定した、追跡 ID ごとの背番号
-    var trackNumbers: [Int: Int]? = nil
-    /// ユーザーが割り当てた背番号（追跡 ID → 背番号。0 は割り当ての解除）
-    var numberOverrides: [Int: Int]? = nil
-    /// ユーザーが目で確かめた追跡の評価（追跡 ID → フレーム番号 → 評価）
-    var trackReviews: [Int: [Int: TrackReviewMark]]? = nil
-    
-    /// 追跡 ID ごとの背番号（ユーザーの割り当てを優先）
-    var effectiveTrackNumbers: [Int: Int] {
-        var numbers = trackNumbers ?? [:]
-        for (trackID, number) in numberOverrides ?? [:] {
-            numbers[trackID] = number > 0 ? number : nil
-        }
-        return numbers
-    }
-    
-    var chapterList: [MatchChapter] {
-        (chapters ?? []).sorted { $0.eventTime < $1.eventTime }
-    }
-    
-    /// 動画ファイル（取り込み時に Documents へコピーしたもの）
-    var videoURL: URL {
-        URL.documentsDirectory.appending(path: videoName)
-    }
-    
-    /// 画像が保存されているフレーム
-    var framesWithImages: [SavedFrame] {
-        frames.filter { $0.imageFileName != nil }
-    }
-    
-    /// 指定した時刻に最も近い、画像のあるフレーム
-    func nearestFrameWithImage(to time: Double) -> SavedFrame? {
-        framesWithImages.min { abs($0.timestamp - time) < abs($1.timestamp - time) }
-    }
-    
+    /// 動画の長さ（秒）。動画ファイルが保存されている場合のみ再生に使う
+    var videoDuration: Double? = nil
+    /// 解析ディレクトリ内に保存した動画ファイル名（履歴からの再生用）
+    var videoFileName: String? = nil
+    /// ユニフォーム色から判定したチーム
+    var teams: [TeamInfo]? = nil
+    /// 追跡して識別した選手（背番号または A, B, C… の記号で区別する）
+    var players: [PlayerIdentity]? = nil
+    /// 重要シーンの区切りとAI解説
+    var segments: [SceneSegment]? = nil
+    /// シーン解説や総評が生成できなかった理由（Apple Intelligence 利用不可など）
+    var adviceUnavailableReason: String? = nil
+
     // MARK: - 集計
     
     var totalDetections: Int {
@@ -159,33 +159,24 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
         guard let first = frames.first, let last = frames.last else { return 0 }
         return last.timestamp - first.timestamp
     }
-}
 
-extension SavedFrame {
-    /// 解析結果から保存用のフレームを作る
-    nonisolated init(processed frame: ProcessedFrame, assignments: [Int: DetectionAssignment]?, state: FrameState?) {
-        self.init(
-            frameNumber: frame.index,
-            timestamp: frame.timestamp,
-            imageFileName: frame.imageFileName,
-            detections: frame.detections.enumerated().map { index, detection in
-                let assignment = assignments?[index]
-                // 審判と判定されたが、色と追跡からチームが決まった人は選手として扱う
-                let isReassignedReferee = detection.sportsClass == .referee && assignment?.team != nil
-                return SavedDetection(
-                    label: isReassignedReferee ? SportsClass.player.rawValue : detection.label,
-                    confidence: detection.confidence,
-                    boundingBox: detection.boundingBox,
-                    pitchPosition: detection.pitchPosition,
-                    inCourt: detection.inCourt,
-                    team: assignment?.team,
-                    trackID: assignment?.trackID,
-                    jerseyNumber: detection.jerseyNumber
-                )
-            },
-            phase: state?.phase,
-            possession: state?.possession,
-            ball: state?.ball
-        )
+    /// 画像が保存されているフレーム
+    var framesWithImages: [SavedFrame] {
+        frames.filter { $0.imageFileName != nil }
+    }
+
+    /// 指定した時刻に最も近い、画像のあるフレーム
+    func nearestFrameWithImage(to time: Double) -> SavedFrame? {
+        framesWithImages.min { abs($0.timestamp - time) < abs($1.timestamp - time) }
+    }
+
+    func player(id: Int?) -> PlayerIdentity? {
+        guard let id else { return nil }
+        return players?.first { $0.id == id }
+    }
+
+    func team(id: Int?) -> TeamInfo? {
+        guard let id else { return nil }
+        return teams?.first { $0.id == id }
     }
 }

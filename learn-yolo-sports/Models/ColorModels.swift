@@ -1,5 +1,5 @@
 //
-//  AnalysisSetup.swift
+//  ColorModels.swift
 //  learn-yolo-sports
 //
 //  Created by mosugi on 2026/10/03.
@@ -7,103 +7,6 @@
 
 import Foundation
 import CoreGraphics
-
-/// 解析前にユーザーが1回だけ指定する条件
-nonisolated struct AnalysisSetup: Codable, Hashable {
-    var format: MatchFormat
-    /// コートの長さ（m）
-    var pitchLength: Double
-    /// コートの幅（m）
-    var pitchWidth: Double
-    /// タップで指定する基準の長方形
-    var region: ReferenceRegion
-    /// 画像上でタップした4点（正規化座標、左上原点。region.cornerNames の順）
-    var imageCorners: [CGPoint]
-    /// 自チームのユニフォームの色
-    var ownColor: LabColor
-    /// 自チームの色を取得した位置（正規化座標、表示用）
-    var ownSamplePoint: CGPoint
-    /// 自チームが画面右のゴールへ攻めるか
-    var ownAttacksRight: Bool
-    /// 自チームの背番号と名前（任意。背番号の読み取り結果の絞り込みと表示に使う）
-    var roster: [RosterEntry]? = nil
-    
-    var rosterEntries: [RosterEntry] {
-        roster ?? []
-    }
-    
-    /// 背番号に対応する表示名（例: #10 田中）
-    func playerName(number: Int) -> String {
-        if let entry = rosterEntries.first(where: { $0.number == number }), !entry.name.isEmpty {
-            return "#\(number) \(entry.name)"
-        }
-        return "#\(number)"
-    }
-
-    /// 対象チーム（自チーム）
-    static let ownTeamName = "自チーム"
-    static let opponentTeamName = "相手"
-
-    /// 距離の目安を 11人制のコートからこのコートへ換算する係数
-    var lengthScale: Double {
-        pitchLength / MatchFormat.elevenASide.defaultLength
-    }
-
-    /// 自チームが攻める方向に沿った座標（自陣ゴールラインが 0）
-    func attackingCoordinate(of point: CGPoint) -> Double {
-        ownAttacksRight ? Double(point.x) : pitchLength - Double(point.x)
-    }
-
-    /// 指定したピッチ座標のゴールを守っているチーム
-    func defendingTeam(atX x: Double) -> TeamSide {
-        let isLeftHalf = x < pitchLength / 2
-        // 右へ攻めるチームは左のゴールを守る
-        return isLeftHalf == ownAttacksRight ? .own : .opponent
-    }
-}
-
-/// 背番号と名前
-nonisolated struct RosterEntry: Codable, Hashable, Identifiable {
-    let number: Int
-    let name: String
-    
-    var id: Int { number }
-    
-    /// 「10 田中」のような行を並べたテキストから読み込む
-    static func parse(_ text: String) -> [RosterEntry] {
-        var entries: [RosterEntry] = []
-        for line in text.split(whereSeparator: \.isNewline) {
-            let parts = line.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "　" || $0 == "," || $0 == "、" })
-            guard let first = parts.first, let number = Int(first), (0...99).contains(number),
-                  !entries.contains(where: { $0.number == number }) else { continue }
-            let name = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
-            entries.append(RosterEntry(number: number, name: name))
-        }
-        return entries.sorted { $0.number < $1.number }
-    }
-    
-    /// parse(_:) で読み込めるテキストに戻す
-    static func text(for entries: [RosterEntry]) -> String {
-        entries.map { $0.name.isEmpty ? "\($0.number)" : "\($0.number) \($0.name)" }.joined(separator: "\n")
-    }
-}
-
-/// チーム
-nonisolated enum TeamSide: String, Codable, Hashable {
-    case own
-    case opponent
-
-    var displayName: String {
-        switch self {
-        case .own: return AnalysisSetup.ownTeamName
-        case .opponent: return AnalysisSetup.opponentTeamName
-        }
-    }
-
-    var other: TeamSide {
-        self == .own ? .opponent : .own
-    }
-}
 
 /// CIE L*a*b* 色空間の色（ユニフォームの色の比較に使う）
 nonisolated struct LabColor: Codable, Hashable {
@@ -192,7 +95,7 @@ nonisolated struct LabColor: Codable, Hashable {
 }
 
 /// 領域内の代表色と、その色が占める割合
-nonisolated struct WeightedColor {
+nonisolated struct WeightedColor: Codable, Hashable {
     let color: LabColor
     /// 0〜1
     let weight: Double
@@ -283,39 +186,108 @@ nonisolated struct PixelImage {
     }
 
     /// 正規化座標の矩形内にある、芝以外の画素の色（芝が多すぎる場合は nil）
-    private func colors(in rect: CGRect, samplesPerSide: Int) -> [LabColor]? {
+    /// - Parameter fieldColor: コートの床の色。近い画素も芝とみなして除く（灰色がかった人工芝など）
+    private func colors(in rect: CGRect, samplesPerSide: Int, excluding fieldColor: LabColor? = nil) -> [LabColor]? {
         var colors: [LabColor] = []
         for i in 0..<samplesPerSide {
             for j in 0..<samplesPerSide {
                 let x = Double(rect.minX) + Double(rect.width) * (Double(i) + 0.5) / Double(samplesPerSide)
                 let y = Double(rect.minY) + Double(rect.height) * (Double(j) + 0.5) / Double(samplesPerSide)
-                let px = min(width - 1, max(0, Int(x * Double(width))))
-                let py = min(height - 1, max(0, Int(y * Double(height))))
-                let offset = (py * width + px) * 4
-                let r = Int(pixels[offset]), g = Int(pixels[offset + 1]), b = Int(pixels[offset + 2])
+                let (r, g, b) = rgb(atX: x, y: y)
 
                 // 緑が目立って強い画素は芝とみなして除く
-                if g > r + 12 && g > b + 12 { continue }
-                colors.append(LabColor(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255))
+                if g > r + 12.0 / 255 && g > b + 12.0 / 255 { continue }
+                let color = LabColor(red: r, green: g, blue: b)
+                if let fieldColor, color.distance(to: fieldColor) < 15 { continue }
+                colors.append(color)
             }
         }
         guard colors.count >= max(3, samplesPerSide * samplesPerSide / 5) else { return nil }
         return colors
     }
 
+    /// 正規化座標の1画素の sRGB（各 0〜1）
+    private func rgb(atX x: Double, y: Double) -> (red: Double, green: Double, blue: Double) {
+        let px = min(width - 1, max(0, Int(x * Double(width))))
+        let py = min(height - 1, max(0, Int(y * Double(height))))
+        let offset = (py * width + px) * 4
+        return (Double(pixels[offset]) / 255, Double(pixels[offset + 1]) / 255, Double(pixels[offset + 2]) / 255)
+    }
+
     /// 選手のバウンディングボックス（正規化座標）から、ユニフォームの胴体部分の色を最大3色にまとめて求める
     ///
     /// 平均色にすると、遠くの小さな選手では背景（フェンス・ネット・ライン）や肌の色が混ざって
     /// 別のチームの色に寄ってしまうため、色ごとの割合で残す。
-    func jerseyPalette(of box: CGRect) -> [WeightedColor]? {
+    func jerseyPalette(of box: CGRect, excluding fieldColor: LabColor? = nil) -> [WeightedColor]? {
         let torso = CGRect(
             x: box.minX + box.width * 0.25,
             y: box.minY + box.height * 0.15,
             width: box.width * 0.5,
             height: box.height * 0.35
         )
-        guard let colors = colors(in: torso, samplesPerSide: 10) else { return nil }
+        guard let colors = colors(in: torso, samplesPerSide: 10, excluding: fieldColor) else { return nil }
         let palette = WeightedColor.palette(of: colors)
         return palette.isEmpty ? nil : palette
+    }
+}
+
+// MARK: - コートの判定
+
+extension PixelImage {
+    /// コートの床（芝や体育館の床）の色。画面の下 3/4 で最も広い色とみなす（はっきりしない場合は nil）
+    nonisolated func fieldColor() -> LabColor? {
+        var colors: [LabColor] = []
+        let columns = 24, rows = 18
+        for i in 0..<columns {
+            for j in 0..<rows {
+                let x = (Double(i) + 0.5) / Double(columns)
+                let y = 0.25 + 0.75 * (Double(j) + 0.5) / Double(rows)
+                colors.append(color(atX: x, y: y))
+            }
+        }
+        guard let dominant = WeightedColor.palette(of: colors).first, dominant.weight >= 0.35 else { return nil }
+        return dominant.color
+    }
+
+    /// 足元（枠の下端のすぐ下）がコートの床の色か。足元が画面外で判定できない場合は nil
+    ///
+    /// カメラが動くとコートの4隅は固定できないため、観客席・ベンチ・フェンスの外など、
+    /// 床の色の上に立っていない人をコート外とみなす。白線の上に立つこともあるため、割合は緩めに見る。
+    nonisolated func isOnField(_ box: CGRect, fieldColor: LabColor) -> Bool? {
+        let top = Double(box.maxY) - Double(box.height) * 0.05
+        let bottom = Double(box.maxY) + Double(box.height) * 0.12
+        guard bottom <= 1 else { return nil }
+        let left = Double(box.minX) - Double(box.width) * 0.25
+        let right = Double(box.maxX) + Double(box.width) * 0.25
+
+        var matches = 0, total = 0
+        let columns = 8, rows = 4
+        for i in 0..<columns {
+            for j in 0..<rows {
+                let x = left + (right - left) * (Double(i) + 0.5) / Double(columns)
+                let y = top + (bottom - top) * (Double(j) + 0.5) / Double(rows)
+                guard x >= 0, x <= 1 else { continue }
+                total += 1
+                if color(atX: x, y: y).distance(to: fieldColor) < 22 {
+                    matches += 1
+                }
+            }
+        }
+        guard total >= 8 else { return nil }
+        return Double(matches) / Double(total) >= 0.25
+    }
+
+    /// 正規化座標の1画素の色
+    nonisolated private func color(atX x: Double, y: Double) -> LabColor {
+        let value = rgb(atX: x, y: y)
+        return LabColor(red: value.red, green: value.green, blue: value.blue)
+    }
+}
+
+extension LabColor {
+    /// 保存・表示用の RGB
+    nonisolated var rgbColor: RGBColor {
+        let value = rgb
+        return RGBColor(red: value.red, green: value.green, blue: value.blue)
     }
 }

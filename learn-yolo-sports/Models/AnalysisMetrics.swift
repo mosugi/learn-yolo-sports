@@ -36,13 +36,25 @@ nonisolated struct AnalysisMetrics {
     let densestMoment: (timestamp: Double, players: Int)?
     /// ボールの平均移動速度（画面幅/秒）
     let averageBallSpeed: Double?
-    
+    /// ユニフォーム色から判定したチーム（nil の場合は未判定）
+    let teams: [TeamInfo]?
+    /// チームごとの1フレームあたりの平均選手数（player のみ、team.id をキーにする）
+    let averagePlayersByTeam: [Int: Double]
+    /// チームごとに、写っていた選手の呼び名（#10、A など。team.id をキーにする）
+    let playerLabelsByTeam: [Int: [String]]
+
+    /// 保存済みの解析結果全体から指標を作る
     init(record: SavedAnalysis) {
-        let frames = record.frames
+        self.init(frames: record.frames, duration: record.coveredDuration, teams: record.teams, players: record.players)
+    }
+
+    /// 指定したフレーム群・時間幅から指標を作る（シーン単位の指標にも使う）
+    init(frames: [SavedFrame], duration: Double, teams: [TeamInfo]?, players identities: [PlayerIdentity]? = nil) {
         frameCount = frames.count
-        coveredDuration = record.coveredDuration
-        ballDetectionRate = record.ballDetectionRate
-        
+        coveredDuration = duration
+        self.teams = teams
+        ballDetectionRate = frames.isEmpty ? 0 : Double(frames.filter { !$0.detections(of: .ball).isEmpty }.count) / Double(frames.count)
+
         func players(in frame: SavedFrame) -> [SavedDetection] {
             frame.detections(of: .player) + frame.detections(of: .goalkeeper)
         }
@@ -81,13 +93,59 @@ nonisolated struct AnalysisMetrics {
             speeds.append(Double(hypot(b.x - a.x, b.y - a.y)) / interval)
         }
         averageBallSpeed = speeds.isEmpty ? nil : speeds.reduce(0, +) / Double(speeds.count)
+
+        // チームごとの平均選手数・写っていた選手（player のみ、フレームは1回だけ走査する）
+        var playersByTeam: [Int: Double] = [:]
+        var playerIDsByTeam: [Int: Set<Int>] = [:]
+        if let teams, !teams.isEmpty {
+            var totalsByTeam: [Int: Int] = [:]
+            for team in teams {
+                totalsByTeam[team.id] = 0
+            }
+
+            for frame in frames {
+                for detection in frame.detections(of: .player) {
+                    guard let teamID = detection.team, totalsByTeam[teamID] != nil else { continue }
+                    totalsByTeam[teamID, default: 0] += 1
+                    if let playerID = detection.playerID {
+                        playerIDsByTeam[teamID, default: []].insert(playerID)
+                    }
+                }
+            }
+
+            let frameCount = frames.isEmpty ? 1 : frames.count
+            for team in teams {
+                playersByTeam[team.id] = Double(totalsByTeam[team.id] ?? 0) / Double(frameCount)
+            }
+        }
+        averagePlayersByTeam = playersByTeam
+        let identityByID = Dictionary((identities ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        playerLabelsByTeam = playerIDsByTeam.mapValues { ids in
+            ids.compactMap { identityByID[$0] }.sorted(by: PlayerIdentity.sortOrder).map(\.label)
+        }
     }
-    
+
     /// 指標を日本語のテキストにまとめる（LLM への入力用）
     var summaryText: String {
         var lines: [String] = []
         lines.append("- 解析フレーム数: \(frameCount)（\(String(format: "%.1f", coveredDuration)) 秒分）")
         lines.append("- 1フレームあたりの平均選手数: \(String(format: "%.1f", averagePlayers)) 人")
+        if let teams, !teams.isEmpty {
+            for team in teams {
+                let average = averagePlayersByTeam[team.id] ?? 0
+                var line = "- \(team.name)（\(ColorNaming.japaneseName(for: team.color))系ユニフォーム）の平均人数: \(String(format: "%.1f", average)) 人"
+                // オンデバイス LLM のコンテキストに収まるよう、背番号の分かる選手だけ挙げて残りは人数にする
+                if let labels = playerLabelsByTeam[team.id], !labels.isEmpty {
+                    let numbered = labels.filter { $0.hasPrefix("#") }
+                    var parts: [String] = []
+                    if !numbered.isEmpty { parts.append(numbered.prefix(11).joined(separator: ", ")) }
+                    let others = labels.count - min(numbered.count, 11)
+                    if others > 0 { parts.append("ほか\(others)人") }
+                    line += "、写っていた選手: \(parts.joined(separator: "、"))"
+                }
+                lines.append(line)
+            }
+        }
         lines.append("- ボール検出率: \(Self.percent(ballDetectionRate))")
         if ballDetectionRate > 0 {
             lines.append("- ボール位置（画面の左/中央/右）: \(Self.zonesText(ballHorizontalZones))")
@@ -104,7 +162,7 @@ nonisolated struct AnalysisMetrics {
         lines.append("- 選手の左右の散らばり（標準偏差、画面幅比）: \(String(format: "%.2f", averagePlayerSpread))")
         return lines.joined(separator: "\n")
     }
-    
+
     // MARK: - Helpers
     
     /// 0〜1 の値を3分割した領域ごとの割合

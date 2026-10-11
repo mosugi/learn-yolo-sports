@@ -11,11 +11,11 @@ struct ContentView: View {
     enum AppTab: String, Hashable {
         case analysis
         case history
-        case player
         case info
     }
     
     @Environment(VideoAnalysisViewModel.self) private var analysisViewModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = LaunchOptions.initialTab
     
     var body: some View {
@@ -32,12 +32,6 @@ struct ContentView: View {
                     Label("履歴", systemImage: "clock.arrow.circlepath")
                 }
                 .tag(AppTab.history)
-            
-            VideoPickerView()
-                .tabItem {
-                    Label("動画再生", systemImage: "play.rectangle")
-                }
-                .tag(AppTab.player)
             
             InfoView()
                 .tabItem {
@@ -59,6 +53,12 @@ struct ContentView: View {
             // 解析タブを開いたまま完了した場合は確認済みとみなす
             if newValue && selectedTab == .analysis {
                 analysisViewModel.markResultSeen()
+            }
+        }
+        .onChange(of: scenePhase) { _, newValue in
+            // バックグラウンドで生成できなかったAI解説をフォアグラウンド復帰時に再試行する
+            if newValue == .active {
+                analysisViewModel.appDidBecomeActive()
             }
         }
     }

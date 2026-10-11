@@ -5,48 +5,9 @@
 //  Created by mosugi on 2026/10/10.
 //
 
-import AVFoundation
 import Foundation
 import PhotosUI
 import SwiftUI
-
-/// 読み込んだ動画の基本情報
-nonisolated struct VideoInfo: Sendable {
-    /// 長さ（秒）
-    let duration: Double
-    /// 解像度（回転補正なし）
-    let size: CGSize
-    /// フレームレート
-    let frameRate: Float
-    /// ファイルサイズ（バイト）
-    let fileSize: Int64?
-
-    /// 抽出設定から解析対象のフレーム数を見積もる（VideoFrameExtractor と同じ間引き方）
-    func expectedFrameCount(fps: Int, maxFrames: Int) -> Int {
-        let interval = max(1, Int(frameRate) / max(1, fps))
-        let sourceFrames = Int((duration * Double(frameRate)).rounded(.up))
-        let extracted = Int((Double(sourceFrames) / Double(interval)).rounded(.up))
-        return max(1, min(maxFrames, extracted))
-    }
-
-    /// 動画の情報を読み込む
-    static func load(from url: URL) async throws -> VideoInfo {
-        let asset = AVURLAsset(url: url)
-        let duration = try await asset.load(.duration)
-        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
-            throw FrameExtractionError.noVideoTrack
-        }
-        let size = try await track.load(.naturalSize)
-        let frameRate = try await track.load(.nominalFrameRate)
-        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
-        return VideoInfo(
-            duration: CMTimeGetSeconds(duration),
-            size: size,
-            frameRate: frameRate,
-            fileSize: fileSize
-        )
-    }
-}
 
 /// フォトライブラリからの動画読み込み（iCloud からのダウンロードとコピー）の進捗を管理する
 ///
