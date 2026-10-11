@@ -14,6 +14,9 @@ nonisolated struct PlayerTrackingResult {
     let assignments: [Int: [Int: Assignment]]
     let teams: [TeamInfo]?
     let players: [PlayerIdentity]
+    /// 周りが動いている間も動かなかったため、コート外の人（観客・控えなど）とみなした検出
+    /// [フレームの番号（frames の添字）: 検出の番号]
+    var excluded: [Int: Set<Int>] = [:]
 
     nonisolated struct Assignment {
         let trackID: Int
@@ -25,12 +28,16 @@ nonisolated struct PlayerTrackingResult {
     func apply(to frames: inout [SavedFrame]) {
         for frameIndex in frames.indices {
             let frameAssignments = assignments[frameIndex] ?? [:]
+            let frameExcluded = excluded[frameIndex] ?? []
             frames[frameIndex].detections = frames[frameIndex].detections.enumerated().map { index, detection in
                 var updated = detection
                 let assignment = frameAssignments[index]
                 updated.trackID = assignment?.trackID
                 updated.team = assignment?.team
                 updated.playerID = assignment?.playerID
+                if frameExcluded.contains(index) {
+                    updated.inCourt = false
+                }
                 if detection.label == SportsClass.referee.rawValue, assignment?.team != nil {
                     updated = SavedDetection(
                         label: SportsClass.player.rawValue,
@@ -80,6 +87,23 @@ nonisolated enum PlayerTracker {
     static func analyze(frames: [SavedFrame], aspectRatio: Double) -> PlayerTrackingResult {
         let aspect = aspectRatio > 0 ? aspectRatio : 16.0 / 9.0
 
+        // 白線の外も芝が続く会場では、床の色だけでは観客や控えの選手を除けない。
+        // 一度全員で追跡し、周りが動いているのに動かない人を見つけたら、その人を除いて
+        // チームの色・追跡・呼び名を求め直す（観客の服の色がチームの色に混ざらないように）
+        let first = analyze(frames: frames, aspect: aspect, excluded: [:])
+        guard !first.stationary.isEmpty else { return first.result }
+        var result = analyze(frames: frames, aspect: aspect, excluded: first.stationary).result
+        result.excluded = first.stationary
+        return result
+    }
+
+    /// - Parameter excluded: 除く検出 [フレームの番号: 検出の番号]
+    /// - Returns: 追跡の結果と、動かなかった人の検出
+    private static func analyze(
+        frames: [SavedFrame],
+        aspect: Double,
+        excluded: [Int: Set<Int>]
+    ) -> (result: PlayerTrackingResult, stationary: [Int: Set<Int>]) {
         // 1. 人の観測を集める（コート外は除く）。画面が切り替わったら区間を分ける
         var observations: [[Observation]] = []
         var sections: [Int] = []
@@ -89,8 +113,9 @@ nonisolated enum PlayerTracker {
             sections.append(section)
             let offset = frame.cameraOffset ?? .zero
             var list: [Observation] = []
+            let frameExcluded = excluded[index] ?? []
             for (detectionIndex, detection) in frame.detections.enumerated() {
-                guard !detection.isExcluded, let sportsClass = SportsClass(rawValue: detection.label), sportsClass != .ball else { continue }
+                guard !detection.isExcluded, !frameExcluded.contains(detectionIndex), let sportsClass = SportsClass(rawValue: detection.label), sportsClass != .ball else { continue }
                 let foot = detection.footPoint
                 list.append(Observation(
                     detectionIndex: detectionIndex,
@@ -136,7 +161,83 @@ nonisolated enum PlayerTracker {
             }
         }
 
-        return PlayerTrackingResult(assignments: assignments, teams: classified?.teams, players: players)
+        var stationary: [Int: Set<Int>] = [:]
+        for index in stationaryTracks(tracks) {
+            for point in tracks[index].points {
+                stationary[point.frame, default: []].insert(observations[point.frame][point.observation].detectionIndex)
+            }
+        }
+
+        return (PlayerTrackingResult(assignments: assignments, teams: classified?.teams, players: players), stationary)
+    }
+
+    // MARK: - Stationary people
+
+    /// 動かない人をコート外とみなすのに必要な、写っていた時間（秒）
+    static let minimumStationaryDuration = 6.0
+    /// 動いていないとみなす平均の速さ（身長/秒。約 0.4 m/s）
+    static let stationarySpeed = 0.25
+    /// 周りが動いているとみなす速さ（身長/秒）
+    static let activeGroupSpeed = 0.5
+    /// 周りの速さに対して、これより遅ければ動いていないとみなす割合
+    static let stationaryRatio = 0.4
+
+    /// 周りの選手が動いている間、ほとんど動かなかった追跡（観客・控えの選手・コーチなど）
+    ///
+    /// 位置はカメラの動きを打ち消した値なので、カメラが振られても止まっている人は動かない。
+    /// 試合が止まって全員が立ち止まる場面で選手を除かないよう、同じ時間の他の人の速さと比べる。
+    /// GK はプレーから離れて立っていることが多いため対象にしない。
+    static func stationaryTracks(_ tracks: [Track]) -> [Int] {
+        func duration(_ track: Track) -> Double { track.last.time - track.first.time }
+
+        // 1秒ごとの速さ（身長/秒）
+        func speedsPerSecond(_ track: Track) -> [Int: Double] {
+            var samples: [Int: TrackPoint] = [:]
+            for point in track.points {
+                let second = Int(point.time.rounded())
+                if let existing = samples[second],
+                   abs(existing.time - Double(second)) <= abs(point.time - Double(second)) { continue }
+                samples[second] = point
+            }
+            var speeds: [Int: Double] = [:]
+            for (second, a) in samples {
+                guard let b = samples[second + 1], b.time > a.time else { continue }
+                speeds[second] = distance(a.position, b.position, height: (a.height + b.height) / 2) / (b.time - a.time)
+            }
+            return speeds
+        }
+
+        let candidates = tracks.indices.filter { !tracks[$0].isGoalkeeper && duration(tracks[$0]) >= 2 }
+        var speedsOfTrack: [Int: [Int: Double]] = [:]
+        var speedsAtSecond: [Int: [(track: Int, speed: Double)]] = [:]
+        for index in candidates {
+            let speeds = speedsPerSecond(tracks[index])
+            speedsOfTrack[index] = speeds
+            for (second, speed) in speeds {
+                speedsAtSecond[second, default: []].append((index, speed))
+            }
+        }
+
+        func median(_ values: [Double]) -> Double {
+            let sorted = values.sorted()
+            return sorted[sorted.count / 2]
+        }
+
+        return candidates.filter { index in
+            guard duration(tracks[index]) >= minimumStationaryDuration,
+                  let speeds = speedsOfTrack[index], speeds.count >= 4 else { return false }
+            let own = speeds.values.reduce(0, +) / Double(speeds.count)
+            guard own < stationarySpeed else { return false }
+
+            // 同じ時間に写っていた他の人の速さの中央値
+            let others = speeds.keys.compactMap { second -> Double? in
+                let values = (speedsAtSecond[second] ?? []).filter { $0.track != index }.map(\.speed)
+                return values.count >= 3 ? median(values) : nil
+            }
+            guard others.count >= 3 else { return false }
+            let group = others.reduce(0, +) / Double(others.count)
+            return group >= activeGroupSpeed && own < group * stationaryRatio
+        }
     }
 
     // MARK: - Identity
