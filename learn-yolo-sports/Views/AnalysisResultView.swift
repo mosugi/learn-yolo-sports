@@ -27,12 +27,18 @@ struct AnalysisResultView: View {
     @AppStorage("showTacticalAdvice") private var showAdvice = true
     @AppStorage("pauseAtAdvice") private var pauseAtAdvice = true
     @AppStorage("showBirdsEye") private var showBirdsEye = false
-    /// 注目時点で一時停止して解説している場面
-    @State private var adviceMoment: SceneSegment.ID?
+    /// 注目時点で止めて、書き込みながら解説している流れ
+    @State private var telestration: TelestrationScript?
+    @State private var telestrationStepIndex = 0
+    /// 書き込みの進み具合（0 から 1 へアニメーションする）
+    @State private var telestrationProgress = 1.0
+    /// 実際の選択を見せるため、ゆっくり再生している
+    @State private var telestrationIsPlaying = false
+    /// 書き込みを自動で次の手順へ進める
+    @State private var telestrationAutoAdvance = true
+    @State private var telestrationTask: Task<Void, Never>?
     /// 解説した場面（同じ再生で何度も止めないため）
     @State private var shownMoments: Set<SceneSegment.ID> = []
-    /// 解説中の矢印を描く割合（0 から 1 へアニメーションする）
-    @State private var arrowProgress = 1.0
     /// コートの白線・ボール周辺の空いた場所を表示するか
     @AppStorage("showFieldLines") private var showFieldLines = true
     @AppStorage("showOpenSpaces") private var showOpenSpaces = true
@@ -80,10 +86,19 @@ struct AnalysisResultView: View {
                         }
                         sceneNavigator
                             .padding(.horizontal)
-                        if let segment = adviceMomentSegment {
-                            adviceMomentCard(segment)
+                        if let telestration {
+                            telestrationCard(telestration)
                                 .padding(.horizontal)
                                 .transition(.move(edge: .top).combined(with: .opacity))
+                        } else if let segment = currentSegment, segment.tactics?.options.isEmpty == false {
+                            Button {
+                                startTelestration(for: segment)
+                            } label: {
+                                Label("このシーンを書き込みで解説", systemImage: "pencil.and.scribble")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .padding(.horizontal)
                         }
                         if focusPath == nil, record.players?.isEmpty == false {
                             Label("選手の枠をタップすると、その選手を追いかけて動きのアドバイスを作成します", systemImage: "hand.tap")
@@ -142,65 +157,23 @@ struct AnalysisResultView: View {
         GeometryReader { geo in
             ZStack {
                 VideoPlayer(player: player)
-                // 白線とスペースは、検出枠の表示とは別に切り替える
-                if let frame = nearestFrame(to: currentTime) {
-                    fieldOverlay(for: frame, size: geo.size)
-                }
-                if showPlayers, let frame = nearestFrame(to: currentTime) {
-                    DetectionOverlayView(
-                        detections: frame.detections,
-                        teams: record.teams,
-                        players: record.players,
-                        displaySize: geo.size,
-                        focusedPlayerID: focusPath?.playerID,
-                        onSelectPlayer: toggleFocus(playerID:)
-                    )
-                }
-                // 選んだ選手のマーカーは、枠の表示を消していても出す
-                if let focusPath, let focusedPlayer {
-                    PlayerFocusMarker(path: focusPath, label: focusedPlayer.label, displaySize: geo.size) {
-                        let seconds = CMTimeGetSeconds(player.currentTime())
-                        return seconds.isFinite ? seconds : 0
-                    }
-                }
-                // 注目時点の前後では選択肢の矢印も重ねる（解説中は矢印が伸びていくように描く）
-                if showAdvice, let segment = currentSegment, let tactics = segment.tactics,
-                   adviceMoment == segment.id || abs(currentTime - tactics.timestamp) <= 1.0 {
-                    TacticalArrowsView(
-                        snapshot: tactics,
-                        recommendedOptionID: segment.recommendedOptionID,
-                        displaySize: geo.size,
-                        progress: adviceMoment == segment.id ? arrowProgress : 1
-                    )
-                    .allowsHitTesting(false)
+                if let telestration {
+                    // 書き込み中は他の表示を消し、書き込みだけにする
+                    telestrationLayer(telestration, size: geo.size)
+                } else {
+                    playbackOverlays(size: geo.size)
                 }
             }
         }
         .aspectRatio(videoAspectRatio, contentMode: .fit)
         .background(Color.black)
         .overlay(alignment: .topTrailing) {
-            Menu {
-                Section("動画に重ねる") {
-                    Toggle("選手（検出枠）", isOn: $showPlayers)
-                    Toggle("コートの白線", isOn: $showFieldLines)
-                    Toggle("空いたスペース（点線）", isOn: $showOpenSpaces)
-                    Toggle("アドバイス（選択肢の矢印）", isOn: $showAdvice)
-                }
-                Section {
-                    Toggle("注目場面で止めて解説", isOn: $pauseAtAdvice)
-                    Toggle("俯瞰図", isOn: $showBirdsEye)
-                }
-            } label: {
-                Image(systemName: showPlayers || showFieldLines || showOpenSpaces || showAdvice ? "eye.fill" : "eye.slash")
-                    .padding(8)
-                    .background(.black.opacity(0.5))
-                    .foregroundStyle(.white)
-                    .clipShape(Circle())
-            }
-            .padding(8)
+            overlayMenu
         }
         .overlay(alignment: .topLeading) {
-            focusBadge
+            if telestration == nil {
+                focusBadge
+            }
         }
         .overlay(alignment: .leading) {
             sceneJumpButton(next: false)
@@ -208,6 +181,67 @@ struct AnalysisResultView: View {
         .overlay(alignment: .trailing) {
             sceneJumpButton(next: true)
         }
+    }
+
+    /// 通常の再生中に重ねる表示（白線・スペース・検出枠・選手のマーカー・選択肢の矢印）
+    private func playbackOverlays(size: CGSize) -> some View {
+        ZStack {
+            // 白線とスペースは、検出枠の表示とは別に切り替える
+            if let frame = nearestFrame(to: currentTime) {
+                fieldOverlay(for: frame, size: size)
+            }
+            if showPlayers, let frame = nearestFrame(to: currentTime) {
+                DetectionOverlayView(
+                    detections: frame.detections,
+                    teams: record.teams,
+                    players: record.players,
+                    displaySize: size,
+                    focusedPlayerID: focusPath?.playerID,
+                    onSelectPlayer: toggleFocus(playerID:)
+                )
+            }
+            // 選んだ選手のマーカーは、枠の表示を消していても出す
+            if let focusPath, let focusedPlayer {
+                PlayerFocusMarker(path: focusPath, label: focusedPlayer.label, displaySize: size) {
+                    let seconds = CMTimeGetSeconds(player.currentTime())
+                    return seconds.isFinite ? seconds : 0
+                }
+            }
+            // 注目時点の前後では選択肢の矢印も重ねる
+            if showAdvice, let segment = currentSegment, let tactics = segment.tactics,
+               abs(currentTime - tactics.timestamp) <= 1.0 {
+                TacticalArrowsView(
+                    snapshot: tactics,
+                    recommendedOptionID: segment.recommendedOptionID,
+                    displaySize: size
+                )
+                .allowsHitTesting(false)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    /// 動画に重ねる内容を選ぶメニュー
+    private var overlayMenu: some View {
+        Menu {
+            Section("動画に重ねる") {
+                Toggle("選手（検出枠）", isOn: $showPlayers)
+                Toggle("コートの白線", isOn: $showFieldLines)
+                Toggle("空いたスペース（点線）", isOn: $showOpenSpaces)
+                Toggle("アドバイス（選択肢の矢印）", isOn: $showAdvice)
+            }
+            Section {
+                Toggle("注目場面で止めて書き込み解説", isOn: $pauseAtAdvice)
+                Toggle("俯瞰図", isOn: $showBirdsEye)
+            }
+        } label: {
+            Image(systemName: showPlayers || showFieldLines || showOpenSpaces || showAdvice ? "eye.fill" : "eye.slash")
+                .padding(8)
+                .background(.black.opacity(0.5))
+                .foregroundStyle(.white)
+                .clipShape(Circle())
+        }
+        .padding(8)
     }
 
     /// マーカーを付けている選手と、解除ボタン
@@ -265,118 +299,242 @@ struct AnalysisResultView: View {
         }
     }
 
-    // MARK: - Advice moment
+    // MARK: - Telestration
 
-    private var adviceMomentSegment: SceneSegment? {
-        adviceMoment.flatMap { id in record.segments?.first { $0.id == id } }
+    private var currentTelestrationStep: TelestrationStep? {
+        guard let telestration, telestration.steps.indices.contains(telestrationStepIndex) else { return nil }
+        return telestration.steps[telestrationStepIndex]
     }
 
-    /// 再生中に注目時点を通り過ぎたら、一時停止して矢印を伸ばしながら解説する
+    /// 再生中に注目時点を通り過ぎたら、止めて書き込みながら解説する
     private func pauseAtAdviceMomentIfNeeded(from previous: Double, to now: Double) {
-        // シークで大きく飛んだときは止めない
-        guard showAdvice, pauseAtAdvice, adviceMoment == nil, player.rate > 0,
+        // シークで大きく飛んだときや、解説中（実際の選択の再生中）は止めない
+        guard showAdvice, pauseAtAdvice, telestration == nil, player.rate > 0,
               now > previous, now - previous < 2 else { return }
         guard let segment = record.segments?.first(where: { segment in
             guard let tactics = segment.tactics, !tactics.options.isEmpty else { return false }
             return tactics.timestamp > previous && tactics.timestamp <= now && !shownMoments.contains(segment.id)
-        }), let tactics = segment.tactics else { return }
+        }) else { return }
+        startTelestration(for: segment)
+    }
 
-        player.pause()
-        seek(to: tactics.timestamp)
+    private func startTelestration(for segment: SceneSegment) {
         shownMoments.insert(segment.id)
-        arrowProgress = 0
+        guard let script = Telestrator.script(for: segment, in: record) else { return }
+        player.pause()
+        telestrationAutoAdvance = true
         withAnimation(.spring(duration: 0.4)) {
-            adviceMoment = segment.id
+            telestration = script
         }
-        withAnimation(.easeOut(duration: 1.4).delay(0.2)) {
-            arrowProgress = 1
+        showTelestrationStep(0)
+    }
+
+    /// 手順を表示する（実際の選択はゆっくり再生してから止める）
+    private func showTelestrationStep(_ index: Int) {
+        guard let telestration, telestration.steps.indices.contains(index) else { return }
+        telestrationTask?.cancel()
+        let step = telestration.steps[index]
+        telestrationStepIndex = index
+        telestrationProgress = 0
+        telestrationIsPlaying = false
+
+        telestrationTask = Task {
+            if let playback = step.playback {
+                preciseSeek(to: playback.lowerBound)
+                telestrationIsPlaying = true
+                player.playImmediately(atRate: Telestrator.playbackRate)
+                let duration = (playback.upperBound - playback.lowerBound) / Double(Telestrator.playbackRate)
+                try? await Task.sleep(for: .seconds(duration))
+                guard !Task.isCancelled else { return }
+                telestrationIsPlaying = false
+            }
+            player.pause()
+            preciseSeek(to: step.time)
+            withAnimation(.easeOut(duration: 1.6)) {
+                telestrationProgress = 1
+            }
+            guard telestrationAutoAdvance else { return }
+            try? await Task.sleep(for: .seconds(1.6 + step.hold))
+            guard !Task.isCancelled else { return }
+            advanceTelestration()
         }
     }
 
-    private func replayAdviceAnimation() {
-        arrowProgress = 0
-        withAnimation(.easeOut(duration: 1.4)) {
-            arrowProgress = 1
+    private func advanceTelestration() {
+        guard let telestration else { return }
+        if telestrationStepIndex + 1 < telestration.steps.count {
+            showTelestrationStep(telestrationStepIndex + 1)
+        } else {
+            finishTelestration(resume: true)
         }
     }
 
-    private func resumeAfterAdvice() {
+    /// 自動で進めるのを止める・再開する
+    private func toggleTelestrationAutoAdvance() {
+        telestrationAutoAdvance.toggle()
+        guard telestrationAutoAdvance, !telestrationIsPlaying, let step = currentTelestrationStep else {
+            if !telestrationAutoAdvance, !telestrationIsPlaying {
+                telestrationTask?.cancel()
+            }
+            return
+        }
+        telestrationTask?.cancel()
+        telestrationTask = Task {
+            try? await Task.sleep(for: .seconds(step.hold / 2))
+            guard !Task.isCancelled else { return }
+            advanceTelestration()
+        }
+    }
+
+    /// 解説を終える（resume なら、実際の選択のあとから続きを再生する）
+    private func finishTelestration(resume: Bool) {
+        guard telestration != nil || telestrationTask != nil else { return }
+        telestrationTask?.cancel()
+        telestrationTask = nil
+        telestrationIsPlaying = false
+        let resumeTime = telestration?.resumeTime
         withAnimation(.easeInOut(duration: 0.25)) {
-            adviceMoment = nil
+            telestration = nil
         }
-        player.play()
+        player.pause()
+        if resume, let resumeTime {
+            preciseSeek(to: resumeTime)
+            player.play()
+        }
     }
 
-    /// 一時停止した注目時点の解説（おすすめの選択肢と理由）
-    private func adviceMomentCard(_ segment: SceneSegment) -> some View {
-        let tactics = segment.tactics
-        let recommended = tactics?.options.first(where: { $0.id == segment.recommendedOptionID })
-        let recommendedComment = recommended.flatMap { comment(for: $0, in: segment) }
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "lightbulb.fill")
-                    .foregroundStyle(.yellow)
-                Text(segment.commentary?.headline ?? segment.title)
-                    .font(.headline)
-                Spacer()
-                Text(DurationText.clock(tactics?.timestamp ?? segment.keyTime))
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-
-            if let recommended {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("\(recommended.id)")
-                        .font(.caption.bold())
-                        .frame(width: 22, height: 22)
-                        .background(Circle().fill(Color.yellow))
-                        .foregroundStyle(.black)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("おすすめ: \(recommended.summary)")
-                            .font(.subheadline.bold())
-                        if let recommendedComment {
-                            Text(recommendedComment)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+    /// 書き込みを動画に重ねる
+    @ViewBuilder
+    private func telestrationLayer(_ script: TelestrationScript, size: CGSize) -> some View {
+        if let step = currentTelestrationStep {
+            ZStack {
+                if telestrationIsPlaying {
+                    TelestrationFollowView(
+                        follows: step.follows,
+                        paths: Dictionary(uniqueKeysWithValues: Set(step.follows.map(\.playerID)).map { id in
+                            (id, PlayerFocusPath(frames: record.frames, playerID: id))
+                        }),
+                        displaySize: size,
+                        projection: { time in
+                            nearestFrame(to: time).flatMap { GroundProjection(detections: $0.detections, aspectRatio: Double(videoAspectRatio)) }
+                        },
+                        currentTime: {
+                            let seconds = CMTimeGetSeconds(player.currentTime())
+                            return seconds.isFinite ? seconds : 0
                         }
-                    }
+                    )
+                } else {
+                    TelestrationOverlay(
+                        step: step,
+                        projection: record.frames.first { $0.frameNumber == step.frameNumber }.flatMap {
+                            GroundProjection(detections: $0.detections, aspectRatio: Double(videoAspectRatio))
+                        },
+                        displaySize: size,
+                        progress: telestrationProgress
+                    )
                 }
+
+                // 放送の字幕のように、いまの手順の一言を下に出す
+                Text(step.caption)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, 10)
+                    .padding(.horizontal, 44)
+                    .id(step.id)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
             }
-            if let suggestion = segment.commentary?.suggestion {
-                Label(suggestion, systemImage: "quote.bubble")
-                    .font(.subheadline)
+            .frame(width: size.width, height: size.height)
+        }
+    }
+
+    /// 書き込み解説の手順と操作
+    private func telestrationCard(_ script: TelestrationScript) -> some View {
+        let step = currentTelestrationStep
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 4) {
+                ForEach(Array(script.steps.enumerated()), id: \.element.id) { index, item in
+                    Button {
+                        showTelestrationStep(index)
+                    } label: {
+                        Text(item.kind.title)
+                            .font(.caption2.bold())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity)
+                            .background(
+                                Capsule().fill(index == telestrationStepIndex ? Color.yellow : (index < telestrationStepIndex ? Color(.systemGray3) : Color(.systemGray5)))
+                            )
+                            .foregroundStyle(index == telestrationStepIndex ? Color.black : Color.primary)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
 
-            HStack {
-                Button {
-                    replayAdviceAnimation()
-                } label: {
-                    Label("もう一度", systemImage: "arrow.counterclockwise")
+            if let step {
+                Text(step.caption)
+                    .font(.headline)
+                if telestrationIsPlaying {
+                    Label("実際のプレーをゆっくり再生しています", systemImage: "slowmo")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.bordered)
-                Spacer()
+                if let detail = step.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(spacing: 8) {
                 Button {
-                    resumeAfterAdvice()
+                    showTelestrationStep(max(0, telestrationStepIndex - 1))
                 } label: {
-                    Label("続きを再生", systemImage: "play.fill")
+                    Label("前へ", systemImage: "chevron.backward")
+                }
+                .disabled(telestrationStepIndex == 0)
+
+                Button {
+                    toggleTelestrationAutoAdvance()
+                } label: {
+                    Label(telestrationAutoAdvance ? "一時停止" : "自動で進む", systemImage: telestrationAutoAdvance ? "pause.fill" : "play.fill")
+                }
+
+                Button {
+                    advanceTelestration()
+                } label: {
+                    Label("次へ", systemImage: "chevron.forward")
+                }
+
+                Spacer()
+
+                Button {
+                    finishTelestration(resume: true)
+                } label: {
+                    Label("終了", systemImage: "xmark")
                 }
                 .buttonStyle(.borderedProminent)
             }
+            .buttonStyle(.bordered)
+            .labelStyle(.iconOnly)
             .font(.subheadline)
+
+            Text("AI が解析結果から自動で書き込んでいます。遠近は写っている選手の大きさからの推定です。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .padding()
         .background(Color(.secondarySystemBackground))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.yellow.opacity(0.6), lineWidth: 1.5))
         .cornerRadius(12)
-    }
-
-    /// 選択肢への AI の評価（選択肢と同じ順番で保存している）
-    private func comment(for option: TacticalOption, in segment: SceneSegment) -> String? {
-        guard let comments = segment.commentary?.optionComments,
-              let index = segment.tactics?.options.firstIndex(where: { $0.id == option.id }),
-              comments.indices.contains(index) else { return nil }
-        return comments[index]
     }
 
     // MARK: - Scene navigation
@@ -495,7 +653,7 @@ struct AnalysisResultView: View {
     }
 
     private func jumpToScene(_ segment: SceneSegment) {
-        adviceMoment = nil
+        finishTelestration(resume: false)
         // 移動したシーンでは、注目時点でもう一度止めて解説する
         shownMoments.remove(segment.id)
         if videoURL != nil {
@@ -516,7 +674,7 @@ struct AnalysisResultView: View {
             let lines = showFieldLines ? fieldLines(near: frame) : nil
             let segment = currentSegment
             let tactics = segment?.tactics.flatMap { tactics in
-                showAdvice && (adviceMoment == segment?.id || abs(currentTime - tactics.timestamp) <= 1.0) ? tactics : nil
+                showAdvice && (telestration?.segmentID == segment?.id || abs(currentTime - tactics.timestamp) <= 1.0) ? tactics : nil
             }
             VStack(alignment: .leading, spacing: 8) {
                 Label("俯瞰図", systemImage: "square.grid.3x3.topleft.filled")
@@ -546,11 +704,20 @@ struct AnalysisResultView: View {
             player.removeTimeObserver(timeObserver)
         }
         timeObserver = nil
+        telestrationTask?.cancel()
+        telestrationTask = nil
         player.pause()
     }
 
     private func seek(to time: Double) {
         player.seek(to: CMTime(seconds: time, preferredTimescale: 600))
+        currentTime = time
+        sceneJumpTarget = nil
+    }
+
+    /// 書き込みの位置が場面とずれないよう、指定した時刻ちょうどに移動する
+    private func preciseSeek(to time: Double) {
+        player.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = time
         sceneJumpTarget = nil
     }
