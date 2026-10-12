@@ -253,7 +253,7 @@ nonisolated enum IntelligenceAdvisor {
             lines.append("")
             lines.append("重要シーン:")
             for segment in segments.sorted(by: { $0.startTime < $1.startTime }) {
-                let headline = segment.commentary?.headline.map { "「\($0)」" } ?? ""
+                let headline = segment.commentary.map { "「\($0.headline)」" } ?? ""
                 lines.append("- \(DurationText.clock(segment.startTime)) \(segment.kind.japaneseName)\(headline)")
             }
         }
