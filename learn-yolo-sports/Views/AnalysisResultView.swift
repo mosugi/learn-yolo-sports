@@ -21,6 +21,9 @@ struct AnalysisResultView: View {
     @State private var player = AVPlayer()
     @State private var currentTime: Double = 0
     @State private var showOverlay = true
+    /// コートの白線・ボール周辺の空いた場所を表示するか
+    @AppStorage("showFieldLines") private var showFieldLines = true
+    @AppStorage("showOpenSpaces") private var showOpenSpaces = true
     @State private var timeObserver: Any?
     /// マーカーを付け続ける選手の位置
     @State private var focusPath: PlayerFocusPath?
@@ -116,6 +119,7 @@ struct AnalysisResultView: View {
             ZStack {
                 VideoPlayer(player: player)
                 if showOverlay, let frame = nearestFrame(to: currentTime) {
+                    fieldOverlay(for: frame, size: geo.size)
                     DetectionOverlayView(
                         detections: frame.detections,
                         teams: record.teams,
@@ -143,8 +147,10 @@ struct AnalysisResultView: View {
         .aspectRatio(videoAspectRatio, contentMode: .fit)
         .background(Color.black)
         .overlay(alignment: .topTrailing) {
-            Button {
-                showOverlay.toggle()
+            Menu {
+                Toggle("検出枠・選択肢", isOn: $showOverlay)
+                Toggle("コートの白線", isOn: $showFieldLines)
+                Toggle("空いたスペース（点線）", isOn: $showOpenSpaces)
             } label: {
                 Image(systemName: showOverlay ? "eye.fill" : "eye.slash")
                     .padding(8)
@@ -223,6 +229,31 @@ struct AnalysisResultView: View {
     private func seek(to time: Double) {
         player.seek(to: CMTime(seconds: time, preferredTimescale: 600))
         currentTime = time
+    }
+
+    /// 白線とボール周辺の空いた場所
+    @ViewBuilder
+    private func fieldOverlay(for frame: SavedFrame, size: CGSize) -> some View {
+        let lines = showFieldLines ? fieldLines(near: frame) : nil
+        let spaces = showOpenSpaces ? SpaceFinder.spaces(in: frame, aspectRatio: Double(videoAspectRatio)) : []
+        if lines != nil || !spaces.isEmpty {
+            FieldOverlayView(lines: lines?.lines ?? [], lineShift: lines?.shift ?? .zero, spaces: spaces, displaySize: size)
+        }
+    }
+
+    /// 表示中のフレームに最も近い、白線を求めたフレーム（1 秒ごと）の白線
+    ///
+    /// 間のフレームでは、カメラの動きの分だけ白線をずらして重ねる。
+    private func fieldLines(near frame: SavedFrame) -> (lines: [FieldLine], shift: CGPoint)? {
+        guard let source = record.frames
+            .filter({ $0.fieldLines?.isEmpty == false })
+            .min(by: { abs($0.timestamp - frame.timestamp) < abs($1.timestamp - frame.timestamp) }),
+              abs(source.timestamp - frame.timestamp) <= 1.0,
+              let lines = source.fieldLines else { return nil }
+        // 画面上の位置 + カメラの移動量 = 動画全体で共通の位置
+        let from = source.cameraOffset ?? .zero
+        let to = frame.cameraOffset ?? .zero
+        return (lines, CGPoint(x: from.x - to.x, y: from.y - to.y))
     }
 
     private func nearestFrame(to time: Double) -> SavedFrame? {
@@ -580,6 +611,7 @@ struct AnalysisResultView: View {
                     }
                     if legacyFrames.indices.contains(selectedFrameIndex) {
                         let frame = legacyFrames[selectedFrameIndex]
+                        fieldOverlay(for: frame, size: geo.size)
                         DetectionOverlayView(
                             detections: frame.detections,
                             teams: record.teams,

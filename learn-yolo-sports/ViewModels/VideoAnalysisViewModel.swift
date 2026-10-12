@@ -230,7 +230,7 @@ final class VideoAnalysisViewModel {
             let directory = self.store.directoryURL(for: recordID)
             let (frames, result, segments) = await Task.detached(priority: .userInitiated) {
                 var frames = record.frames
-                let appearances = Self.appearanceFeatures(frames: frames, directory: directory)
+                let appearances = Self.analyzeKeyFrames(frames: &frames, directory: directory)
                 let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
                 var segments = SceneSegmenter.segments(frames: frames, duration: duration)
                 for index in segments.indices {
@@ -475,7 +475,7 @@ final class VideoAnalysisViewModel {
                 let directory = store.directoryURL(for: id)
                 let (tracked, result) = await Task.detached(priority: .userInitiated) {
                     var tracked = detectedFrames
-                    let appearances = Self.appearanceFeatures(frames: tracked, directory: directory)
+                    let appearances = Self.analyzeKeyFrames(frames: &tracked, directory: directory)
                     let result = PlayerTracker.analyze(frames: tracked, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
                     result.apply(to: &tracked)
                     return (tracked, result)
@@ -809,11 +809,22 @@ final class VideoAnalysisViewModel {
         )
     }
 
-    /// 解析ディレクトリに保存した画像から、選手の見た目の特徴を求める（選手の識別に使う）
-    private nonisolated static func appearanceFeatures(frames: [SavedFrame], directory: URL) -> AppearanceExtractor.Features {
-        AppearanceExtractor.features(frames: frames) { frame in
-            frame.imageFileName.map { directory.appending(path: $0) }
+    /// 解析ディレクトリに保存した画像（1 秒ごと）を 1 枚ずつ読み、コートの白線をフレームに書き込み、
+    /// 選手の見た目の特徴（選手の識別に使う）を返す
+    private nonisolated static func analyzeKeyFrames(frames: inout [SavedFrame], directory: URL) -> AppearanceExtractor.Features {
+        var appearances: AppearanceExtractor.Features = [:]
+        let keyFrames = frames.indices.filter { frames[$0].imageFileName != nil }
+        for (order, index) in keyFrames.enumerated() {
+            guard let name = frames[index].imageFileName,
+                  let image = FrameImageIO.readImage(at: directory.appending(path: name)) else { continue }
+            let detections = frames[index].detections
+            frames[index].fieldLines = FieldLineDetector.lines(in: image, excluding: detections.map(\.boundingBox))
+            if order % AppearanceExtractor.keyFrameStride == 0 {
+                let found = AppearanceExtractor.features(in: image, detections: detections)
+                if !found.isEmpty { appearances[index] = found }
+            }
         }
+        return appearances
     }
 
     private nonisolated static func aspectRatio(width: Int, height: Int) -> Double {
@@ -838,7 +849,7 @@ final class VideoAnalysisViewModel {
             let directory = self.store.directoryURL(for: recordID)
             let (frames, result) = await Task.detached(priority: .userInitiated) {
                 var frames = record.frames
-                let appearances = Self.appearanceFeatures(frames: frames, directory: directory)
+                let appearances = Self.analyzeKeyFrames(frames: &frames, directory: directory)
                 let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
                 return (frames, result)
             }.value

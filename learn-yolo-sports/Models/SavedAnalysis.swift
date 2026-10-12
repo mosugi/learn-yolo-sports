@@ -98,6 +98,8 @@ nonisolated struct SavedFrame: Codable, Hashable, Identifiable {
     var cameraOffset: CGPoint? = nil
     /// 直前のフレームから画面が切り替わった（大きく動いた・リプレイなど）か
     var sceneCut: Bool? = nil
+    /// コートの白線（画像を保存したフレームのみ。選手の識別をやり直すと求め直す）
+    var fieldLines: [FieldLine]? = nil
 
     var id: Int { frameNumber }
 
