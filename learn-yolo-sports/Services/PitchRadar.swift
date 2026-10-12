@@ -31,6 +31,12 @@ nonisolated struct PitchRadar {
         let samples: [Sample]
     }
 
+    /// 選手として識別されていない検出（追跡が短いなど）。補間はせず、そのフレームの位置だけを出す
+    nonisolated struct LooseFrame {
+        let time: Double
+        let players: [(point: CGPoint, team: Int?)]
+    }
+
     nonisolated struct Goal: Identifiable {
         enum Side { case left, right }
         let side: Side
@@ -48,6 +54,7 @@ nonisolated struct PitchRadar {
     private static let minimumGoalkeeperSamples = 4
 
     let tracks: [Track]
+    let looseFrames: [LooseFrame]
     let ball: [Sample]
     let goals: [Goal]
     /// ゴールの幅と高さ（m）
@@ -84,6 +91,7 @@ nonisolated struct PitchRadar {
         struct Observation {
             let time: Double
             let playerID: Int?
+            let team: Int?
             let isGoalkeeper: Bool
             let world: CGPoint
         }
@@ -95,6 +103,7 @@ nonisolated struct PitchRadar {
                 observations.append(Observation(
                     time: frame.timestamp,
                     playerID: detection.playerID,
+                    team: detection.team,
                     isGoalkeeper: detection.label == SportsClass.goalkeeper.rawValue,
                     world: world
                 ))
@@ -170,6 +179,13 @@ nonisolated struct PitchRadar {
             )
         }
         .sorted { $0.id < $1.id }
+        // 識別されていない検出も、チームの色で出す（選手として識別されていなくても写っていたことは分かるように）
+        // 識別済みの選手がいないフレームでも描けるよう、フレームごとにまとめる
+        let identified = Set(tracks.map(\.id))
+        let loose = observations.filter { $0.playerID.map { !identified.contains($0) } ?? true }
+        looseFrames = Dictionary(grouping: loose, by: \.time)
+            .map { time, items in LooseFrame(time: time, players: items.map { (point: radar($0.world), team: $0.team) }) }
+            .sorted { $0.time < $1.time }
         ball = balls.map { Sample(time: $0.time, point: radar($0.world)) }
 
         switch record.playersPerTeam ?? 11 {
@@ -201,6 +217,19 @@ nonisolated struct PitchRadar {
         let nearest = [before, after].compactMap { $0 }.min { abs($0.time - time) < abs($1.time - time) }
         guard let nearest, abs(nearest.time - time) <= hold else { return nil }
         return nearest.point
+    }
+
+    /// 指定時刻に最も近い、識別されていない検出のフレーム（within 秒以内）
+    func looseFrame(at time: Double, within: Double = 0.5) -> LooseFrame? {
+        var lower = 0, upper = looseFrames.count
+        while lower < upper {
+            let mid = (lower + upper) / 2
+            if looseFrames[mid].time < time { lower = mid + 1 } else { upper = mid }
+        }
+        let candidates = [lower - 1, lower].filter { looseFrames.indices.contains($0) }.map { looseFrames[$0] }
+        guard let nearest = candidates.min(by: { abs($0.time - time) < abs($1.time - time) }),
+              abs(nearest.time - time) <= within else { return nil }
+        return nearest
     }
 
     /// ワールド座標を、指定したフレームの画面上の位置（正規化座標）にする

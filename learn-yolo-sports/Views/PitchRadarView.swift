@@ -83,6 +83,16 @@ struct PitchRadarView: View {
     // MARK: - Players
 
     private func drawPlayers(in context: inout GraphicsContext, rect: CGRect, time: Double) {
+        // 選手として識別されていない検出は、名前なしの小さな印で出す
+        if let loose = radar.looseFrame(at: time) {
+            for player in loose.players {
+                let center = point(player.point, in: rect)
+                let team = player.team.flatMap { id in teams?.first { $0.id == id } }
+                let circle = CGRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8)
+                context.fill(Path(ellipseIn: circle), with: .color((team?.color.color ?? .gray).opacity(0.75)))
+                context.stroke(Path(ellipseIn: circle), with: .color(.white.opacity(0.6)), lineWidth: 1)
+            }
+        }
         for track in radar.tracks {
             guard let position = PitchRadar.position(in: track.samples, at: time) else { continue }
             let center = point(position, in: rect)
