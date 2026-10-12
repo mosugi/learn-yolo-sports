@@ -43,8 +43,6 @@ nonisolated struct PlayEvent: Hashable, Identifiable {
 /// 各フレームでボールに最も近い選手を持ち主とみなし、持ち主が変わった（2 回続けて同じ選手が持った）ところを
 /// パス・ボール奪取として拾う。改善の提案ではなく、何が起きたかを伝えるためのもの。
 nonisolated struct MatchPlayByPlay {
-    /// ボールを持っているとみなす、足元からボールまでの最大距離（画面の高さ=1 の単位）
-    private static let possessionDistance = 0.12
     /// ボールが見えない間も、同じ持ち主とみなす時間（秒）
     private static let holdGap = 2.0
     /// ドリブルとして伝える、運んだ距離（m）と時間（秒）
@@ -60,43 +58,13 @@ nonisolated struct MatchPlayByPlay {
             ? Double(record.imageWidth) / Double(record.imageHeight)
             : 16.0 / 9.0
         let labels = Dictionary((record.players ?? []).map { ($0.id, $0.label) }, uniquingKeysWith: { a, _ in a })
-        func gap(_ a: CGPoint, _ b: CGPoint) -> Double {
-            hypot(Double(a.x - b.x) * aspect, Double(a.y - b.y))
-        }
         func name(_ playerID: Int, team: Int?) -> String {
             let label = labels[playerID] ?? "選手"
             guard let teamName = record.team(id: team)?.name else { return label }
             return "\(teamName)の\(label)"
         }
 
-        // フレームごとのボールの持ち主
-        struct Holding {
-            let time: Double
-            let playerID: Int
-            let team: Int
-            /// 動画全体で共通の足元の位置（画面の高さ=1 の単位）と枠の高さ
-            let position: CGPoint
-            let height: Double
-            let sceneCut: Bool
-        }
-        var holdings: [Holding] = []
-        for frame in record.frames.sorted(by: { $0.timestamp < $1.timestamp }) {
-            guard let ball = frame.detections(of: .ball).max(by: { $0.confidence < $1.confidence }) else { continue }
-            let people = (frame.detections(of: .player) + frame.detections(of: .goalkeeper))
-                .filter { $0.playerID != nil && $0.team != nil }
-            guard let holder = people.min(by: { gap($0.footPoint, ball.center) < gap($1.footPoint, ball.center) }),
-                  gap(holder.footPoint, ball.center) <= Self.possessionDistance,
-                  let playerID = holder.playerID, let team = holder.team else { continue }
-            let offset = frame.cameraOffset ?? .zero
-            holdings.append(Holding(
-                time: frame.timestamp,
-                playerID: playerID,
-                team: team,
-                position: CGPoint(x: (holder.footPoint.x + offset.x) * aspect, y: holder.footPoint.y + offset.y),
-                height: Double(holder.boundingBox.height),
-                sceneCut: frame.sceneCut == true
-            ))
-        }
+        let holdings = BallPossession.holdings(frames: record.frames, aspect: aspect)
 
         var events: [PlayEvent] = []
         func add(_ time: Double, _ kind: PlayEvent.Kind, team: Int?, _ text: String) {
@@ -104,9 +72,9 @@ nonisolated struct MatchPlayByPlay {
         }
 
         var possessionTime: [Int: Double] = [:]
-        var current: Holding?
+        var current: BallPossession.Holding?
         /// 今の持ち主が持ち始めた位置と、ドリブルを伝えたか
-        var start: Holding?
+        var start: BallPossession.Holding?
         var reportedDribble = false
         for (index, holding) in holdings.enumerated() {
             if let current, !holding.sceneCut, holding.time - current.time <= Self.holdGap {
@@ -146,7 +114,7 @@ nonisolated struct MatchPlayByPlay {
 
         // 重要シーンの始まりも、流れの目印として入れる
         for segment in record.segments ?? [] {
-            let team = segment.tactics?.attackingTeam
+            let team = segment.team ?? segment.tactics?.attackingTeam
             let teamName = record.team(id: team)?.name
             let text: String
             switch segment.kind {
@@ -154,6 +122,8 @@ nonisolated struct MatchPlayByPlay {
             case .congestion: text = "ボールの周りで競り合いになります"
             case .fastBreak: text = teamName.map { "\($0)の速い攻撃" } ?? "速い展開になります"
             case .goalThreat: text = teamName.map { "\($0)がゴール前に迫ります" } ?? "ゴール前の攻防"
+            case .transition: text = teamName.map { "\($0)がボールを奪い、攻守が切り替わります" } ?? "攻守が切り替わります"
+            case .goal: text = teamName.map { "\($0)が得点" } ?? "得点"
             }
             add(segment.startTime, .scene(segment.kind), team: team, text)
         }
@@ -203,5 +173,77 @@ nonisolated struct MatchPlayByPlay {
             lines.append("- \(DurationText.clock(event.time)) \(event.text)")
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// 各フレームのボールの持ち主（ボールに最も近い選手）
+nonisolated enum BallPossession {
+    /// ボールを持っているとみなす、足元からボールまでの最大距離（画面の高さ=1 の単位）
+    static let possessionDistance = 0.12
+
+    nonisolated struct Holding {
+        let time: Double
+        let playerID: Int
+        let team: Int
+        /// 動画全体で共通の足元の位置（画面の高さ=1 の単位）と枠の高さ
+        let position: CGPoint
+        let height: Double
+        let sceneCut: Bool
+    }
+
+    /// ボールが写っていて、近くにチームの分かる選手がいるフレームの持ち主（時刻順）
+    static func holdings(frames: [SavedFrame], aspect: Double) -> [Holding] {
+        func gap(_ a: CGPoint, _ b: CGPoint) -> Double {
+            hypot(Double(a.x - b.x) * aspect, Double(a.y - b.y))
+        }
+        var holdings: [Holding] = []
+        for frame in frames.sorted(by: { $0.timestamp < $1.timestamp }) {
+            guard let ball = frame.detections(of: .ball).max(by: { $0.confidence < $1.confidence }) else { continue }
+            let people = (frame.detections(of: .player) + frame.detections(of: .goalkeeper))
+                .filter { $0.playerID != nil && $0.team != nil }
+            guard let holder = people.min(by: { gap($0.footPoint, ball.center) < gap($1.footPoint, ball.center) }),
+                  gap(holder.footPoint, ball.center) <= possessionDistance,
+                  let playerID = holder.playerID, let team = holder.team else { continue }
+            let offset = frame.cameraOffset ?? .zero
+            holdings.append(Holding(
+                time: frame.timestamp,
+                playerID: playerID,
+                team: team,
+                position: CGPoint(x: (holder.footPoint.x + offset.x) * aspect, y: holder.footPoint.y + offset.y),
+                height: Double(holder.boundingBox.height),
+                sceneCut: frame.sceneCut == true
+            ))
+        }
+        return holdings
+    }
+
+    /// 攻守の切り替え（相手チームの選手が 2 回続けてボールを持った時点）
+    /// - Returns: 時刻と、ボールを奪ったチーム、奪ったあとにボールを持ち続けた時間（秒）
+    static func turnovers(in holdings: [Holding], holdGap: Double = 2.0) -> [(time: Double, team: Int, playerID: Int, kept: Double)] {
+        var result: [(time: Double, team: Int, playerID: Int, kept: Double)] = []
+        var currentTeam: Int?
+        var lastTime = -Double.infinity
+        for (index, holding) in holdings.enumerated() {
+            defer { lastTime = holding.time }
+            if holding.sceneCut || holding.time - lastTime > holdGap {
+                currentTeam = holding.team
+                continue
+            }
+            guard let team = currentTeam, holding.team != team else { continue }
+            // 1 フレームだけ近くを通った相手は数えない
+            let next = holdings.indices.contains(index + 1) ? holdings[index + 1] : nil
+            guard next == nil || next?.team == holding.team else { continue }
+            currentTeam = holding.team
+            // 奪ったチームがボールを持ち続けた時間（相手に渡るか、途切れるまで）
+            var kept = 0.0
+            var previous = holding.time
+            for later in holdings[(index + 1)...] {
+                if later.sceneCut || later.time - previous > holdGap || later.team != holding.team { break }
+                kept = later.time - holding.time
+                previous = later.time
+            }
+            result.append((holding.time, holding.team, holding.playerID, kept))
+        }
+        return result
     }
 }

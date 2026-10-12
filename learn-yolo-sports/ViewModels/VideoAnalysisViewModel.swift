@@ -130,6 +130,8 @@ final class VideoAnalysisViewModel {
     private var backgroundSession: ContinuedProcessingSession?
     /// AI 解説を作成し直している解析結果
     private(set) var retryingRecordID: UUID?
+    /// 作成中に、もう一度作成を確かめる必要が出た解析結果（作成中に得点のシーンを加えたときなど）
+    private var pendingAdviceRecordIDs: Set<UUID> = []
 
     init(store: AnalysisStore) {
         self.store = store
@@ -233,7 +235,7 @@ final class VideoAnalysisViewModel {
                 var frames = record.frames
                 let appearances = Self.analyzeKeyFrames(frames: &frames, directory: directory)
                 let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
-                var segments = SceneSegmenter.segments(frames: frames, duration: duration)
+                var segments = SceneSegmenter.segments(frames: frames, duration: duration, aspectRatio: aspectRatio)
                 for index in segments.indices {
                     segments[index].tactics = TacticalPlanner.snapshot(
                         for: segments[index],
@@ -334,16 +336,25 @@ final class VideoAnalysisViewModel {
     ///
     /// Foundation Models はバックグラウンドでは生成が制限されるため、アプリが前面にあるときだけ行う。
     func generateMissingAdvice(for id: UUID) {
-        guard !isAnalyzing, retryingRecordID == nil,
+        guard !isAnalyzing,
               Self.isAppActive,
               let record = store.record(for: id),
               record.adviceUnavailableReason != nil,
               IntelligenceAdvisor.unavailableReason == nil else { return }
 
+        guard retryingRecordID == nil else {
+            // 作成中なら、終わったあとにもう一度確かめる
+            pendingAdviceRecordIDs.insert(id)
+            return
+        }
+
         retryingRecordID = id
         Task {
             await self.retryMissingAdvice(for: id)
             self.retryingRecordID = nil
+            if let next = self.pendingAdviceRecordIDs.popFirst() {
+                self.generateMissingAdvice(for: next)
+            }
         }
     }
 
@@ -485,7 +496,7 @@ final class VideoAnalysisViewModel {
                 frames = tracked
                 teams = result.teams
                 players = result.players
-                segments = SceneSegmenter.segments(frames: frames, duration: checkpoint.videoDuration)
+                segments = SceneSegmenter.segments(frames: frames, duration: checkpoint.videoDuration, aspectRatio: aspectRatio)
 
                 try await store.rewriteFrames(id: id, frames: frames)
 
@@ -887,6 +898,89 @@ final class VideoAnalysisViewModel {
         }
     }
 
+    // MARK: - Goal scenes
+
+    /// 得点した時刻を記録し、得点までの場面をシーンとして加える（AI 解説・書き込み解説の対象になる）
+    ///
+    /// 得点は映像からは確実に判定できないため、再生しながら利用者が記録する。
+    /// 得点の 12 秒前から 4 秒後までをシーンとし、重なる他のシーンは手前で区切る。
+    func addGoalScene(recordID: UUID, time: Double, team: Int?) {
+        guard var record = store.record(for: recordID) else { return }
+        let duration = record.videoDuration ?? record.coveredDuration
+        let start = max(0, time - 12)
+        let end = min(max(duration, time), time + 4)
+        guard end > start else { return }
+        // シュートを打つ前の判断の時点を注目時点にする
+        var goal = SceneSegment(startTime: start, endTime: end, keyTime: max(start, time - 3), kind: .goal, team: team)
+        goal.tactics = TacticalPlanner.snapshot(
+            for: goal,
+            frames: record.frames.filter { $0.timestamp >= start && $0.timestamp <= time },
+            aspectRatio: Self.aspectRatio(width: record.imageWidth, height: record.imageHeight),
+            players: record.players
+        )
+
+        var segments: [SceneSegment] = []
+        var displaced: [SceneSegment] = []
+        for segment in record.segments ?? [] {
+            // 得点のシーンと重なる部分を除く（短くなりすぎたシーンはなくす）
+            var pieces: [(Double, Double)] = []
+            if segment.startTime < start { pieces.append((segment.startTime, min(segment.endTime, start))) }
+            if segment.endTime > end { pieces.append((max(segment.startTime, end), segment.endTime)) }
+            if pieces.count == 1, pieces[0] == (segment.startTime, segment.endTime) {
+                segments.append(segment)
+                continue
+            }
+            // 取り消したときに戻せるよう、元のシーンを残しておく
+            displaced.append(segment)
+            // 注目時点を含む側を残す
+            let kept = pieces.first { $0.0 <= segment.keyTime && segment.keyTime < $0.1 } ?? pieces.max { ($0.1 - $0.0) < ($1.1 - $1.0) }
+            guard let kept, kept.1 - kept.0 >= 2 else { continue }
+            var trimmed = SceneSegment(
+                id: segment.id,
+                startTime: kept.0,
+                endTime: kept.1,
+                keyTime: min(max(segment.keyTime, kept.0), kept.1),
+                kind: segment.kind,
+                commentary: segment.commentary,
+                tactics: segment.tactics,
+                team: segment.team
+            )
+            if let tactics = trimmed.tactics, !trimmed.contains(tactics.timestamp) {
+                trimmed.tactics = nil
+            }
+            segments.append(trimmed)
+        }
+        goal.displacedSegments = displaced
+        segments.append(goal)
+        record.segments = segments.sorted { $0.startTime < $1.startTime }
+        record.matchReport = nil
+        record.adviceUnavailableReason = IntelligenceAdvisor.unavailableReason ?? IntelligenceAdvisor.deferredMessage
+        do {
+            try store.update(record)
+            generateMissingAdvice(for: recordID)
+        } catch {
+            errorMessage = "エラー: \(error.localizedDescription)"
+        }
+    }
+
+    /// 記録した得点のシーンを取り消す（区切ったり除いたりした元のシーンは戻す）
+    func removeScene(recordID: UUID, segmentID: SceneSegment.ID) {
+        guard var record = store.record(for: recordID),
+              let removed = record.segments?.first(where: { $0.id == segmentID }) else { return }
+        var segments = (record.segments ?? []).filter { $0.id != segmentID }
+        for original in removed.displacedSegments ?? [] {
+            segments.removeAll { $0.id == original.id }
+            segments.append(original)
+        }
+        record.segments = segments.sorted { $0.startTime < $1.startTime }
+        record.matchReport = nil
+        do {
+            try store.update(record)
+        } catch {
+            errorMessage = "エラー: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: - Advice retry
 
     private func retryMissingAdvice(for id: UUID) async {
@@ -898,6 +992,15 @@ final class VideoAnalysisViewModel {
             if let latest = store.record(for: id) {
                 // 生成中に保存された選手のアドバイスを消さない
                 record.playerAdvice = latest.playerAdvice
+                // 生成中に記録・取り消した得点のシーンも消さない（作った解説は同じシーンに移す）
+                let generated = Dictionary((record.segments ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                record.segments = latest.segments?.map { segment in
+                    var segment = segment
+                    if segment.commentary == nil { segment.commentary = generated[segment.id]?.commentary }
+                    if segment.tactics == nil { segment.tactics = generated[segment.id]?.tactics }
+                    return segment
+                }
+                record.matchReport = latest.matchReport
             }
             try? store.update(record)
         }
@@ -938,8 +1041,9 @@ final class VideoAnalysisViewModel {
             save()
         }
 
-        for index in (record.segments ?? []).indices where canContinue {
-            guard let segment = record.segments?[index], segment.commentary == nil else { continue }
+        // 生成中に得点のシーンが加わっても取り違えないよう、ID で探す
+        for segmentID in (record.segments ?? []).map(\.id) where canContinue {
+            guard let segment = record.segments?.first(where: { $0.id == segmentID }), segment.commentary == nil else { continue }
             let segmentFrames = record.frames.filter { segment.contains($0.timestamp) }
             let metrics = AnalysisMetrics(
                 frames: segmentFrames,
@@ -956,7 +1060,9 @@ final class VideoAnalysisViewModel {
                     teams: teams,
                     usedRealModel: usedRealModel
                 )
-                record.segments?[index].commentary = commentary
+                if let index = record.segments?.firstIndex(where: { $0.id == segmentID }) {
+                    record.segments?[index].commentary = commentary
+                }
             }
             save()
         }

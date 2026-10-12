@@ -74,7 +74,10 @@ struct AnalysisResultView: View {
     }
 
     private var currentSegment: SceneSegment? {
-        record.segments?.first { $0.contains(currentTime) }
+        // 重なっているときは短いシーン（記録した得点など）を優先する
+        record.segments?
+            .filter { $0.contains(currentTime) }
+            .min { ($0.endTime - $0.startTime) < ($1.endTime - $1.startTime) }
     }
 
     var body: some View {
@@ -102,12 +105,17 @@ struct AnalysisResultView: View {
                             telestrationCard(telestration)
                                 .padding(.horizontal)
                                 .transition(.move(edge: .top).combined(with: .opacity))
-                        } else if let segment = currentSegment, segment.tactics?.options.isEmpty == false {
-                            Button {
-                                startTelestration(for: segment)
-                            } label: {
-                                Label("このシーンを書き込みで解説", systemImage: "pencil.and.scribble")
-                                    .frame(maxWidth: .infinity)
+                        } else {
+                            HStack(spacing: 8) {
+                                if let segment = currentSegment, segment.tactics?.options.isEmpty == false {
+                                    Button {
+                                        startTelestration(for: segment)
+                                    } label: {
+                                        Label("書き込みで解説", systemImage: "pencil.and.scribble")
+                                            .frame(maxWidth: .infinity)
+                                    }
+                                }
+                                goalRecordMenu
                             }
                             .buttonStyle(.bordered)
                             .padding(.horizontal)
@@ -309,6 +317,27 @@ struct AnalysisResultView: View {
         .padding(.top, 8)
         .padding(.horizontal, 56)
         .allowsHitTesting(false)
+    }
+
+    /// 再生中の時刻を得点として記録する（得点は映像からは確実に判定できないため）
+    private var goalRecordMenu: some View {
+        Menu {
+            Section("いまの時刻（\(DurationText.clock(currentTime))）を得点として記録") {
+                ForEach(record.teams ?? []) { team in
+                    Button("\(team.name)の得点") {
+                        viewModel.addGoalScene(recordID: record.id, time: currentTime, team: team.id)
+                    }
+                }
+                if record.teams?.isEmpty ?? true {
+                    Button("得点") {
+                        viewModel.addGoalScene(recordID: record.id, time: currentTime, team: nil)
+                    }
+                }
+            }
+        } label: {
+            Label("得点を記録", systemImage: "soccerball")
+                .frame(maxWidth: .infinity)
+        }
     }
 
     /// マーカーを付けている選手と、解除ボタン
@@ -963,6 +992,11 @@ struct AnalysisResultView: View {
 
                 if let commentary = segment.commentary {
                     Text(commentary.commentary)
+                    if let praise = commentary.praise {
+                        Label(praise, systemImage: "hand.thumbsup.fill")
+                            .font(.subheadline)
+                            .foregroundStyle(.green)
+                    }
                     Label(commentary.suggestion, systemImage: "lightbulb")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -978,6 +1012,15 @@ struct AnalysisResultView: View {
                         Text(record.adviceUnavailableReason ?? "この場面のAI解説はまだありません")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                }
+
+                if segment.kind == .goal {
+                    Button(role: .destructive) {
+                        viewModel.removeScene(recordID: record.id, segmentID: segment.id)
+                    } label: {
+                        Label("この得点の記録を取り消す", systemImage: "trash")
+                            .font(.caption)
                     }
                 }
 
