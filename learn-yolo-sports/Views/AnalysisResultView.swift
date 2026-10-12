@@ -200,6 +200,12 @@ struct AnalysisResultView: View {
         .overlay(alignment: .topLeading) {
             focusBadge
         }
+        .overlay(alignment: .leading) {
+            sceneJumpButton(next: false)
+        }
+        .overlay(alignment: .trailing) {
+            sceneJumpButton(next: true)
+        }
     }
 
     /// マーカーを付けている選手と、解除ボタン
@@ -377,16 +383,32 @@ struct AnalysisResultView: View {
         (record.segments ?? []).sorted { $0.startTime < $1.startTime }
     }
 
+    /// シーンの始めに移動した直後でも前のシーンと取り違えないための余裕（秒）
+    private static let sceneTimeTolerance = 0.25
+
     /// 再生位置のシーン（シーンの間にいるときは直前のシーン）
+    ///
+    /// シーンの終わりと次のシーンの始めが同じ時刻のことがあるため、始まりの時刻だけで決める。
     private var currentSceneIndex: Int? {
-        let segments = sortedSegments
-        if let current = currentSegment, let index = segments.firstIndex(where: { $0.id == current.id }) {
-            return index
-        }
-        return segments.lastIndex(where: { $0.startTime <= currentTime })
+        sortedSegments.lastIndex(where: { $0.startTime <= currentTime + Self.sceneTimeTolerance })
     }
 
-    /// 前後のシーンへ移動するボタン
+    /// 再生位置より後に始まる最初のシーン
+    private var nextScene: SceneSegment? {
+        sortedSegments.first { $0.startTime > currentTime + Self.sceneTimeTolerance }
+    }
+
+    /// シーンの始めから 3 秒以上たっていればそのシーンの始め、そうでなければ前のシーン
+    private var previousScene: SceneSegment? {
+        let segments = sortedSegments
+        guard let index = currentSceneIndex else { return nil }
+        if currentTime - segments[index].startTime > 3 || index == 0 {
+            return segments[index]
+        }
+        return segments[index - 1]
+    }
+
+    /// 前後のシーンへ移動するボタン（動画の下）
     @ViewBuilder
     private var sceneNavigator: some View {
         let segments = sortedSegments
@@ -397,11 +419,10 @@ struct AnalysisResultView: View {
                     jumpToPreviousScene()
                 } label: {
                     Label("前のシーン", systemImage: "backward.end.fill")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 44, height: 36)
+                        .frame(height: 36)
                 }
                 .buttonStyle(.bordered)
-                .disabled(index == nil)
+                .disabled(previousScene == nil)
 
                 VStack(spacing: 2) {
                     Text(index.map { "シーン \($0 + 1) / \(segments.count)" } ?? "シーン \(segments.count) 件")
@@ -410,7 +431,7 @@ struct AnalysisResultView: View {
                         .foregroundStyle(.secondary)
                     if let index {
                         Label(segments[index].commentary?.headline ?? segments[index].title, systemImage: segments[index].kind.systemImage)
-                            .font(.subheadline)
+                            .font(.caption)
                             .lineLimit(1)
                     }
                 }
@@ -420,31 +441,41 @@ struct AnalysisResultView: View {
                     jumpToNextScene()
                 } label: {
                     Label("次のシーン", systemImage: "forward.end.fill")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 44, height: 36)
+                        .frame(height: 36)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled((index ?? -1) >= segments.count - 1)
+                .disabled(nextScene == nil)
             }
+            .labelStyle(.iconOnly)
+        }
+    }
+
+    /// 動画の左右に重ねる、前後のシーンへ移動するボタン（スクロールしても動画の上で押せるように）
+    @ViewBuilder
+    private func sceneJumpButton(next: Bool) -> some View {
+        if !sortedSegments.isEmpty, next ? nextScene != nil : previousScene != nil {
+            Button {
+                if next { jumpToNextScene() } else { jumpToPreviousScene() }
+            } label: {
+                Image(systemName: next ? "forward.end.fill" : "backward.end.fill")
+                    .font(.subheadline.bold())
+                    .padding(10)
+                    .background(.black.opacity(0.5), in: Circle())
+                    .foregroundStyle(.white)
+            }
+            .padding(8)
+            .accessibilityLabel(next ? "次のシーン" : "前のシーン")
         }
     }
 
     private func jumpToNextScene() {
-        let segments = sortedSegments
-        let next = currentSceneIndex.map { $0 + 1 } ?? segments.firstIndex(where: { $0.startTime > currentTime })
-        guard let next, segments.indices.contains(next) else { return }
-        jumpToScene(segments[next])
+        guard let nextScene else { return }
+        jumpToScene(nextScene)
     }
 
-    /// シーンの始めから 3 秒以上たっていればそのシーンの始めへ、そうでなければ前のシーンへ
     private func jumpToPreviousScene() {
-        let segments = sortedSegments
-        guard let index = currentSceneIndex else { return }
-        if currentTime - segments[index].startTime > 3 || index == 0 {
-            jumpToScene(segments[index])
-        } else {
-            jumpToScene(segments[index - 1])
-        }
+        guard let previousScene else { return }
+        jumpToScene(previousScene)
     }
 
     private func jumpToScene(_ segment: SceneSegment) {

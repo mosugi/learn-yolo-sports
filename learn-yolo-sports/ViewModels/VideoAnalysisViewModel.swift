@@ -818,7 +818,10 @@ final class VideoAnalysisViewModel {
             guard let name = frames[index].imageFileName,
                   let image = FrameImageIO.readImage(at: directory.appending(path: name)) else { continue }
             let detections = frames[index].detections
-            frames[index].fieldLines = FieldLineDetector.lines(in: image, excluding: detections.map(\.boundingBox))
+            let feet = detections
+                .filter { !$0.isExcluded && $0.label != SportsClass.ball.rawValue }
+                .map(\.footPoint)
+            frames[index].fieldLines = FieldLineDetector.boundary(in: image, excluding: detections.map(\.boundingBox), feet: feet)
             if order % AppearanceExtractor.keyFrameStride == 0 {
                 let found = AppearanceExtractor.features(in: image, detections: detections)
                 if !found.isEmpty { appearances[index] = found }
