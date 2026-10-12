@@ -227,9 +227,11 @@ final class VideoAnalysisViewModel {
             }
             let aspectRatio = Self.aspectRatio(width: record.imageWidth, height: record.imageHeight)
             let duration = record.videoDuration ?? record.coveredDuration
+            let directory = self.store.directoryURL(for: recordID)
             let (frames, result, segments) = await Task.detached(priority: .userInitiated) {
                 var frames = record.frames
-                let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
+                let appearances = Self.appearanceFeatures(frames: frames, directory: directory)
+                let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
                 var segments = SceneSegmenter.segments(frames: frames, duration: duration)
                 for index in segments.indices {
                     segments[index].tactics = TacticalPlanner.snapshot(
@@ -470,9 +472,11 @@ final class VideoAnalysisViewModel {
                 }
                 let playersPerTeam = checkpoint.playersPerTeam ?? AnalysisSettings.playersPerTeam
                 let detectedFrames = frames
+                let directory = store.directoryURL(for: id)
                 let (tracked, result) = await Task.detached(priority: .userInitiated) {
                     var tracked = detectedFrames
-                    let result = PlayerTracker.analyze(frames: tracked, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
+                    let appearances = Self.appearanceFeatures(frames: tracked, directory: directory)
+                    let result = PlayerTracker.analyze(frames: tracked, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
                     result.apply(to: &tracked)
                     return (tracked, result)
                 }.value
@@ -805,6 +809,13 @@ final class VideoAnalysisViewModel {
         )
     }
 
+    /// 解析ディレクトリに保存した画像から、選手の見た目の特徴を求める（選手の識別に使う）
+    private nonisolated static func appearanceFeatures(frames: [SavedFrame], directory: URL) -> AppearanceExtractor.Features {
+        AppearanceExtractor.features(frames: frames) { frame in
+            frame.imageFileName.map { directory.appending(path: $0) }
+        }
+    }
+
     private nonisolated static func aspectRatio(width: Int, height: Int) -> Double {
         width > 0 && height > 0 ? Double(width) / Double(height) : 16.0 / 9.0
     }
@@ -824,9 +835,11 @@ final class VideoAnalysisViewModel {
         Task {
             defer { self.reidentifyingRecordID = nil }
             let aspectRatio = Self.aspectRatio(width: record.imageWidth, height: record.imageHeight)
+            let directory = self.store.directoryURL(for: recordID)
             let (frames, result) = await Task.detached(priority: .userInitiated) {
                 var frames = record.frames
-                let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam)
+                let appearances = Self.appearanceFeatures(frames: frames, directory: directory)
+                let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
                 return (frames, result)
             }.value
 
