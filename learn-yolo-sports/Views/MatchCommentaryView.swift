@@ -49,7 +49,8 @@ struct MatchCommentaryView: View {
         .padding()
         .background(Color(.secondarySystemBackground))
         .cornerRadius(12)
-        .task(id: record.id) {
+        // 得点を記録・取り消すと解説が消えるため、そのときにも作り直す
+        .task(id: "\(record.id)-\(record.matchReport?.generatedAt.timeIntervalSince1970 ?? 0)") {
             guard record.matchReport == nil, IntelligenceAdvisor.unavailableReason == nil else { return }
             await generate()
         }

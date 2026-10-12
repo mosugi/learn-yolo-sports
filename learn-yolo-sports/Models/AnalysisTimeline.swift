@@ -181,6 +181,8 @@ nonisolated struct SceneSegment: Codable, Hashable, Identifiable {
     var tactics: TacticalSnapshot?
     /// 場面の主役のチーム（攻守の切り替えはボールを奪ったチーム、得点は決めたチーム）
     var team: Int? = nil
+    /// 得点のシーンを記録したときに区切ったり除いたりした元のシーン（取り消したときに戻す）
+    var displacedSegments: [SceneSegment]? = nil
 
     init(
         id: UUID = UUID(),

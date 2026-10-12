@@ -130,6 +130,8 @@ final class VideoAnalysisViewModel {
     private var backgroundSession: ContinuedProcessingSession?
     /// AI 解説を作成し直している解析結果
     private(set) var retryingRecordID: UUID?
+    /// 作成中に、もう一度作成を確かめる必要が出た解析結果（作成中に得点のシーンを加えたときなど）
+    private var pendingAdviceRecordIDs: Set<UUID> = []
 
     init(store: AnalysisStore) {
         self.store = store
@@ -334,16 +336,25 @@ final class VideoAnalysisViewModel {
     ///
     /// Foundation Models はバックグラウンドでは生成が制限されるため、アプリが前面にあるときだけ行う。
     func generateMissingAdvice(for id: UUID) {
-        guard !isAnalyzing, retryingRecordID == nil,
+        guard !isAnalyzing,
               Self.isAppActive,
               let record = store.record(for: id),
               record.adviceUnavailableReason != nil,
               IntelligenceAdvisor.unavailableReason == nil else { return }
 
+        guard retryingRecordID == nil else {
+            // 作成中なら、終わったあとにもう一度確かめる
+            pendingAdviceRecordIDs.insert(id)
+            return
+        }
+
         retryingRecordID = id
         Task {
             await self.retryMissingAdvice(for: id)
             self.retryingRecordID = nil
+            if let next = self.pendingAdviceRecordIDs.popFirst() {
+                self.generateMissingAdvice(for: next)
+            }
         }
     }
 
@@ -909,6 +920,7 @@ final class VideoAnalysisViewModel {
         )
 
         var segments: [SceneSegment] = []
+        var displaced: [SceneSegment] = []
         for segment in record.segments ?? [] {
             // 得点のシーンと重なる部分を除く（短くなりすぎたシーンはなくす）
             var pieces: [(Double, Double)] = []
@@ -918,6 +930,8 @@ final class VideoAnalysisViewModel {
                 segments.append(segment)
                 continue
             }
+            // 取り消したときに戻せるよう、元のシーンを残しておく
+            displaced.append(segment)
             // 注目時点を含む側を残す
             let kept = pieces.first { $0.0 <= segment.keyTime && segment.keyTime < $0.1 } ?? pieces.max { ($0.1 - $0.0) < ($1.1 - $1.0) }
             guard let kept, kept.1 - kept.0 >= 2 else { continue }
@@ -936,6 +950,7 @@ final class VideoAnalysisViewModel {
             }
             segments.append(trimmed)
         }
+        goal.displacedSegments = displaced
         segments.append(goal)
         record.segments = segments.sorted { $0.startTime < $1.startTime }
         record.matchReport = nil
@@ -948,10 +963,16 @@ final class VideoAnalysisViewModel {
         }
     }
 
-    /// 記録した得点のシーンを取り消す
+    /// 記録した得点のシーンを取り消す（区切ったり除いたりした元のシーンは戻す）
     func removeScene(recordID: UUID, segmentID: SceneSegment.ID) {
-        guard var record = store.record(for: recordID) else { return }
-        record.segments?.removeAll { $0.id == segmentID }
+        guard var record = store.record(for: recordID),
+              let removed = record.segments?.first(where: { $0.id == segmentID }) else { return }
+        var segments = (record.segments ?? []).filter { $0.id != segmentID }
+        for original in removed.displacedSegments ?? [] {
+            segments.removeAll { $0.id == original.id }
+            segments.append(original)
+        }
+        record.segments = segments.sorted { $0.startTime < $1.startTime }
         record.matchReport = nil
         do {
             try store.update(record)
