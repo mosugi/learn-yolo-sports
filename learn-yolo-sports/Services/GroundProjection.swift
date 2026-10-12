@@ -22,7 +22,7 @@ nonisolated struct GroundProjection {
 
     private let aspect: Double
     /// 焦点距離（画面の高さを 1 とした単位）
-    private let focal: Double
+    let focal: Double
     /// 見下ろす角度（ラジアン）
     private let tilt: Double
     /// カメラの高さ（選手の身長を 1 とした単位）
