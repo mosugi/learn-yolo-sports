@@ -29,8 +29,15 @@ actor VideoFrameExtractor {
     func videoInfo(for url: URL, framesPerSecond: Int) async throws -> VideoInfo {
         let asset = AVURLAsset(url: url)
 
-        guard try await asset.loadTracks(withMediaType: .video).first != nil else {
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw FrameExtractionError.noVideoTrack
+        }
+
+        // ゴールが画面の左右に来る横向きの動画だけに対応する（縦向きはゴール裏などから撮った動画とみなす）
+        let (naturalSize, transform) = try await track.load(.naturalSize, .preferredTransform)
+        let oriented = naturalSize.applying(transform)
+        guard abs(oriented.width) >= abs(oriented.height) else {
+            throw FrameExtractionError.unsupportedOrientation
         }
 
         let duration = try await asset.load(.duration)
@@ -71,11 +78,14 @@ actor VideoFrameExtractor {
 /// フレーム抽出エラー
 nonisolated enum FrameExtractionError: Error, LocalizedError {
     case noVideoTrack
+    case unsupportedOrientation
 
     var errorDescription: String? {
         switch self {
         case .noVideoTrack:
             return "動画トラックが見つかりません"
+        case .unsupportedOrientation:
+            return "縦向きの動画には対応していません。サイドライン側から横向きで、ゴールが画面の左右に来るように撮影した動画を選んでください"
         }
     }
 }

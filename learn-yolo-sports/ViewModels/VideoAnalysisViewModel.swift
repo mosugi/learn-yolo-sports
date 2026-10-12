@@ -191,6 +191,20 @@ final class VideoAnalysisViewModel {
         errorMessage = nil
 
         if record.trackingVersion == PlayerTracker.version, record.playersPerTeam == playersPerTeam {
+            // 識別は変わらないが、指示文が変わっていれば AI の文章だけを作り直す
+            if record.adviceVersion != IntelligenceAdvisor.promptVersion {
+                var updated = record
+                updated.advice = nil
+                updated.playerAdvice = nil
+                updated.segments = updated.segments?.map { segment in
+                    var segment = segment
+                    segment.commentary = nil
+                    return segment
+                }
+                updated.adviceVersion = IntelligenceAdvisor.promptVersion
+                updated.adviceUnavailableReason = IntelligenceAdvisor.unavailableReason ?? IntelligenceAdvisor.deferredMessage
+                try? store.update(updated)
+            }
             currentRecordID = recordID
             hasUnseenResult = true
             generateMissingAdvice(for: recordID)
@@ -241,6 +255,7 @@ final class VideoAnalysisViewModel {
             // 選手もシーンも変わるため、AI の総評・解説・選手のアドバイスは作り直す
             updated.advice = nil
             updated.playerAdvice = nil
+            updated.adviceVersion = IntelligenceAdvisor.promptVersion
             updated.adviceUnavailableReason = IntelligenceAdvisor.unavailableReason ?? IntelligenceAdvisor.deferredMessage
 
             do {
@@ -370,6 +385,10 @@ final class VideoAnalysisViewModel {
             phase = .idle
             handedOverSession?.finish(success: false)
             handedOverSession = nil
+            // 解析ディレクトリへ移す前に失敗した場合は、読み込んだ動画を残さない
+            if FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 
@@ -496,6 +515,7 @@ final class VideoAnalysisViewModel {
             record.fingerprint = checkpoint.fingerprint
             record.detectionVersion = Self.detectionVersion(usedRealModel: checkpoint.usedRealModel)
             record.trackingVersion = PlayerTracker.version
+            record.adviceVersion = IntelligenceAdvisor.promptVersion
 
             var adviceFailureReason: String? = IntelligenceAdvisor.unavailableReason
             // バックグラウンドでは生成が制限されるため、一度制限されたら残りはアプリを開いたときに作る
