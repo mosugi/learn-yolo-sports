@@ -16,13 +16,17 @@ nonisolated struct FieldLine: Codable, Hashable {
 
 /// 保存した画像からコートの白線（直線部分）を見つける
 ///
-/// 芝の上にある白い画素を集め、ハフ変換で直線を求めてから、実際に白い画素が続いている区間を線分にする。
+/// コートの上で周りより明るく彩度の低い画素を集め、ハフ変換で直線を求めてから、実際に白い画素が続いている区間を線分にする。
 /// 選手（白いユニフォーム）やボールの枠の中は除く。センターサークルなどの曲線は扱わない。
 nonisolated enum FieldLineDetector {
     /// 処理する画像の幅（ピクセル）
     static let workingWidth = 320
-    /// 白い画素の周り（この距離）に芝があることを求める
+    /// 白い画素の両側（この距離）にコートがあることを求める
     private static let grassNeighborDistance = 3
+    /// コートの色とみなす、色の差の上限
+    private static let pitchColorTolerance = 0.09
+    /// 白線とみなす、周りの平均より明るい差
+    private static let localContrast = 0.06
     /// 角度の刻み（度）
     private static let angleSteps = 180
     /// 1 枚から求める線の最大数
@@ -56,23 +60,39 @@ nonisolated enum FieldLineDetector {
             let offset = (y * width + x) * 4
             return (Double(pixels[offset]) / 255, Double(pixels[offset + 1]) / 255, Double(pixels[offset + 2]) / 255)
         }
-        func isGrass(_ x: Int, _ y: Int) -> Bool {
-            guard x >= 0, x < width, y >= 0, y < height else { return false }
-            let c = color(x, y)
-            return c.g > c.r + 0.03 && c.g > c.b + 0.03
+        func luminance(_ c: (r: Double, g: Double, b: Double)) -> Double {
+            0.299 * c.r + 0.587 * c.g + 0.114 * c.b
         }
 
-        // 芝の明るさを基準に、それより十分明るく彩度の低い画素を白とみなす
-        var grassLuminance = 0.0, grassCount = 0
-        for y in stride(from: height / 4, to: height, by: 2) {
-            for x in stride(from: 0, to: width, by: 2) where isGrass(x, y) {
+        // コートの色: 画面の下 6 割の中央値（人工芝や夕方の暗い映像では緑が弱いため、色の近さで判断する）
+        var reds: [Double] = [], greens: [Double] = [], blues: [Double] = []
+        for y in stride(from: height * 2 / 5, to: height, by: 2) {
+            for x in stride(from: 0, to: width, by: 2) {
                 let c = color(x, y)
-                grassLuminance += 0.299 * c.r + 0.587 * c.g + 0.114 * c.b
-                grassCount += 1
+                reds.append(c.r)
+                greens.append(c.g)
+                blues.append(c.b)
             }
         }
-        guard grassCount > width * height / 40 else { return [] }
-        grassLuminance /= Double(grassCount)
+        guard !reds.isEmpty else { return [] }
+        func median(_ values: [Double]) -> Double { values.sorted()[values.count / 2] }
+        let pitch = (r: median(reds), g: median(greens), b: median(blues))
+        let pitchLuminance = luminance(pitch)
+        func isPitch(_ x: Int, _ y: Int) -> Bool {
+            guard x >= 0, x < width, y >= 0, y < height else { return false }
+            let c = color(x, y)
+            let distance = max(abs(c.r - pitch.r), abs(c.g - pitch.g), abs(c.b - pitch.b))
+            return distance < pitchColorTolerance || (c.g > c.r + 0.03 && c.g > c.b + 0.03)
+        }
+
+        // 周りより明るい画素（白線）を見つけるため、周りの明るさの平均を求める
+        var lum = [Double](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                lum[y * width + x] = luminance(color(x, y))
+            }
+        }
+        let localMean = boxMean(lum, width: width, height: height, radius: max(3, width / 80))
 
         let excluded = boxes.map { box in
             // 枠の少し外側も影や輪郭の白さが出るため広げる
@@ -83,14 +103,17 @@ nonisolated enum FieldLineDetector {
         let d = grassNeighborDistance
         for y in 0..<height {
             for x in 0..<width {
+                let index = y * width + x
                 let c = color(x, y)
-                let luminance = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b
                 let saturation = max(c.r, c.g, c.b) - min(c.r, c.g, c.b)
-                guard luminance > grassLuminance + 0.18, saturation < 0.2 else { continue }
-                guard isGrass(x - d, y) || isGrass(x + d, y) || isGrass(x, y - d) || isGrass(x, y + d) else { continue }
+                guard lum[index] - localMean[index] > localContrast,
+                      lum[index] > pitchLuminance + 0.05,
+                      saturation < 0.15 else { continue }
+                // 塗った白線は両側がコート。片側だけのもの（フェンスの縁・ゴールのクロスバー・コートの外）は除く
+                guard (isPitch(x - d, y) && isPitch(x + d, y)) || (isPitch(x, y - d) && isPitch(x, y + d)) else { continue }
                 let normalized = CGPoint(x: (Double(x) + 0.5) / Double(width), y: (Double(y) + 0.5) / Double(height))
                 guard !excluded.contains(where: { $0.contains(normalized) }) else { continue }
-                mask[y * width + x] = true
+                mask[index] = true
                 points.append((x, y))
             }
         }
@@ -143,6 +166,30 @@ nonisolated enum FieldLineDetector {
                     start: CGPoint(x: segment.start.x / Double(width), y: segment.start.y / Double(height)),
                     end: CGPoint(x: segment.end.x / Double(width), y: segment.end.y / Double(height))
                 ))
+            }
+        }
+        return result
+    }
+
+    /// 各画素の周り（一辺 2r+1 の正方形）の平均
+    private static func boxMean(_ values: [Double], width: Int, height: Int, radius: Int) -> [Double] {
+        // 累積和で求める
+        var integral = [Double](repeating: 0, count: (width + 1) * (height + 1))
+        for y in 0..<height {
+            var row = 0.0
+            for x in 0..<width {
+                row += values[y * width + x]
+                integral[(y + 1) * (width + 1) + x + 1] = integral[y * (width + 1) + x + 1] + row
+            }
+        }
+        var result = [Double](repeating: 0, count: width * height)
+        for y in 0..<height {
+            let y0 = max(0, y - radius), y1 = min(height, y + radius + 1)
+            for x in 0..<width {
+                let x0 = max(0, x - radius), x1 = min(width, x + radius + 1)
+                let sum = integral[y1 * (width + 1) + x1] - integral[y0 * (width + 1) + x1]
+                    - integral[y1 * (width + 1) + x0] + integral[y0 * (width + 1) + x0]
+                result[y * width + x] = sum / Double((y1 - y0) * (x1 - x0))
             }
         }
         return result
@@ -223,6 +270,8 @@ nonisolated enum FieldBoundary {
     private static let outsideTolerance = 0.15
     /// 外枠を決めるのに必要な選手の数
     private static let minimumFeet = 3
+    /// タッチラインとみなす、選手の足元からの距離の上限（正規化座標の高さ）。これより離れた線はコートの外のもの
+    private static let maxTouchlineGap = (far: 0.15, near: 0.3)
 
     /// 無限に延ばした直線（正規化座標）
     private struct Line {
@@ -271,28 +320,37 @@ nonisolated enum FieldBoundary {
         // 奥のタッチライン: ほとんどの選手より上にある線のうち、選手に最も近いもの
         // （隣のコートの線や、フェンス際の線を拾わないため）
         let topFeet = ys[min(ys.count - 1, ys.count / 10)]
+        let centerX = feet.map { Double($0.x) }.sorted()[feet.count / 2]
         let far = horizontal
             .filter { line in feet.filter { Double($0.y) < line.y(atX: Double($0.x)) - 0.01 }.count <= tolerance }
-            .min { abs(topFeet - $0.y(atX: 0.5)) < abs(topFeet - $1.y(atX: 0.5)) }
+            .filter { topFeet - $0.y(atX: centerX) <= maxTouchlineGap.far }
+            .min { abs(topFeet - $0.y(atX: centerX)) < abs(topFeet - $1.y(atX: centerX)) }
 
         // 手前のタッチライン: ほとんどの選手より下にある線のうち、選手に最も近いもの
         let bottomFeet = ys[max(0, ys.count - 1 - ys.count / 10)]
         let near = horizontal
             .filter { line in feet.filter { Double($0.y) > line.y(atX: Double($0.x)) + 0.01 }.count <= tolerance }
             .filter { line in far.map { abs($0.y(atX: 0.5) - line.y(atX: 0.5)) > 0.05 } ?? true }
-            .min { abs(bottomFeet - $0.y(atX: 0.5)) < abs(bottomFeet - $1.y(atX: 0.5)) }
+            .filter { $0.y(atX: centerX) - bottomFeet <= maxTouchlineGap.near }
+            .min { abs(bottomFeet - $0.y(atX: centerX)) < abs(bottomFeet - $1.y(atX: centerX)) }
 
-        // ゴールライン: 選手のほとんどが片側にいる急な線のうち、最も外側のもの
-        // （ペナルティエリアの線も片側に選手が寄ることがあるため、外側を選ぶ）
+        // ゴールライン: 選手のほとんどが片側にいる急な線のうち、最も端の選手に近いもの
+        // （外側ほどゴールネットやコートの外の線を拾いやすいため、選手に近い線を選ぶ）
+        let xs = feet.map { Double($0.x) }.sorted()
+        let leftFeet = xs[min(xs.count - 1, xs.count / 10)]
+        let rightFeet = xs[max(0, xs.count - 1 - xs.count / 10)]
+        let centerY = ys[ys.count / 2]
         var left: Line?, right: Line?
         for line in steep {
             let leftCount = feet.filter { Double($0.x) < line.x(atY: Double($0.y)) }.count
             let rightCount = feet.count - leftCount
-            let center = line.x(atY: 0.5)
-            if leftCount <= tolerance, rightCount >= minimumFeet, left.map({ center < $0.x(atY: 0.5) }) ?? true {
+            let x = line.x(atY: centerY)
+            if leftCount <= tolerance, rightCount >= minimumFeet,
+               left.map({ abs(leftFeet - x) < abs(leftFeet - $0.x(atY: centerY)) }) ?? true {
                 left = line
             }
-            if rightCount <= tolerance, leftCount >= minimumFeet, right.map({ center > $0.x(atY: 0.5) }) ?? true {
+            if rightCount <= tolerance, leftCount >= minimumFeet,
+               right.map({ abs(rightFeet - x) < abs(rightFeet - $0.x(atY: centerY)) }) ?? true {
                 right = line
             }
         }
