@@ -26,11 +26,23 @@ nonisolated enum FieldLineDetector {
     /// 角度の刻み（度）
     private static let angleSteps = 180
     /// 1 枚から求める線の最大数
-    private static let maxLines = 8
+    private static let maxLines = 14
     /// 線分の最小の長さ（画像の幅に対する割合）
     private static let minimumLengthRatio = 0.12
     /// 線分の途切れを許す長さ（ピクセル）
     private static let maxGap = 12
+
+    /// コートの外枠（タッチラインとゴールライン）を求める
+    ///
+    /// コートは横長の長方形で、カメラが左右に振れて写る範囲が変わるだけ、という前提で、
+    /// 見つけた直線のうち外枠になるものだけを選び、画面の端まで延ばして交点で切る。
+    /// - Parameters:
+    ///   - excluding: 除く範囲（選手・ボールの枠、正規化座標）
+    ///   - feet: 選手の足元（正規化座標）。外枠の内側にいるはずなので、どの線が外枠かを決めるのに使う
+    static func boundary(in image: CGImage, excluding boxes: [CGRect], feet: [CGPoint]) -> [FieldLine] {
+        let aspect = Double(image.width) / Double(max(1, image.height))
+        return FieldBoundary.select(from: lines(in: image, excluding: boxes), feet: feet, aspect: aspect)
+    }
 
     /// 白線を求める
     /// - Parameter excluding: 除く範囲（選手・ボールの枠、正規化座標）
@@ -200,5 +212,140 @@ nonisolated enum FieldLineDetector {
             return true
         }
         return drawn ? buffer : nil
+    }
+}
+
+/// 見つけた白線から、コートの外枠（奥と手前のタッチライン、左右のゴールライン）を選ぶ
+nonisolated enum FieldBoundary {
+    /// これより水平に近い線をタッチライン、急な線をゴールラインの候補にする（度）
+    private static let horizontalLimit = 25.0
+    /// 外枠の外側にいてよい選手の割合（線の誤差や白線上の選手の分）
+    private static let outsideTolerance = 0.15
+    /// 外枠を決めるのに必要な選手の数
+    private static let minimumFeet = 3
+
+    /// 無限に延ばした直線（正規化座標）
+    private struct Line {
+        let point: CGPoint
+        let direction: CGPoint
+
+        init(_ segment: FieldLine) {
+            point = segment.start
+            direction = CGPoint(x: segment.end.x - segment.start.x, y: segment.end.y - segment.start.y)
+        }
+
+        /// 水平からの角度（度）。画面の縦横比を戻して求める
+        func angle(aspect: Double) -> Double {
+            abs(atan2(Double(direction.y), Double(direction.x) * aspect) * 180 / .pi).truncatingRemainder(dividingBy: 180)
+        }
+
+        /// x での y（水平に近い線）
+        func y(atX x: Double) -> Double {
+            guard abs(direction.x) > 1e-6 else { return Double(point.y) }
+            return Double(point.y) + (x - Double(point.x)) * Double(direction.y) / Double(direction.x)
+        }
+
+        /// y での x（急な線）
+        func x(atY y: Double) -> Double {
+            guard abs(direction.y) > 1e-6 else { return Double(point.x) }
+            return Double(point.x) + (y - Double(point.y)) * Double(direction.x) / Double(direction.y)
+        }
+
+        func intersection(with other: Line) -> CGPoint? {
+            let cross = Double(direction.x * other.direction.y - direction.y * other.direction.x)
+            guard abs(cross) > 1e-9 else { return nil }
+            let dx = Double(other.point.x - point.x), dy = Double(other.point.y - point.y)
+            let t = (dx * Double(other.direction.y) - dy * Double(other.direction.x)) / cross
+            return CGPoint(x: Double(point.x) + Double(direction.x) * t, y: Double(point.y) + Double(direction.y) * t)
+        }
+    }
+
+    static func select(from segments: [FieldLine], feet: [CGPoint], aspect: Double) -> [FieldLine] {
+        guard feet.count >= minimumFeet else { return [] }
+        let lines = segments.map(Line.init)
+        let horizontal = lines.filter { isHorizontal($0, aspect: aspect) }
+        let steep = lines.filter { !isHorizontal($0, aspect: aspect) }
+        let tolerance = Int((Double(feet.count) * outsideTolerance).rounded(.down))
+        let ys = feet.map { Double($0.y) }.sorted()
+
+        // 奥のタッチライン: ほとんどの選手より上にある線のうち、選手に最も近いもの
+        // （隣のコートの線や、フェンス際の線を拾わないため）
+        let topFeet = ys[min(ys.count - 1, ys.count / 10)]
+        let far = horizontal
+            .filter { line in feet.filter { Double($0.y) < line.y(atX: Double($0.x)) - 0.01 }.count <= tolerance }
+            .min { abs(topFeet - $0.y(atX: 0.5)) < abs(topFeet - $1.y(atX: 0.5)) }
+
+        // 手前のタッチライン: ほとんどの選手より下にある線のうち、選手に最も近いもの
+        let bottomFeet = ys[max(0, ys.count - 1 - ys.count / 10)]
+        let near = horizontal
+            .filter { line in feet.filter { Double($0.y) > line.y(atX: Double($0.x)) + 0.01 }.count <= tolerance }
+            .filter { line in far.map { abs($0.y(atX: 0.5) - line.y(atX: 0.5)) > 0.05 } ?? true }
+            .min { abs(bottomFeet - $0.y(atX: 0.5)) < abs(bottomFeet - $1.y(atX: 0.5)) }
+
+        // ゴールライン: 選手のほとんどが片側にいる急な線のうち、最も外側のもの
+        // （ペナルティエリアの線も片側に選手が寄ることがあるため、外側を選ぶ）
+        var left: Line?, right: Line?
+        for line in steep {
+            let leftCount = feet.filter { Double($0.x) < line.x(atY: Double($0.y)) }.count
+            let rightCount = feet.count - leftCount
+            let center = line.x(atY: 0.5)
+            if leftCount <= tolerance, rightCount >= minimumFeet, left.map({ center < $0.x(atY: 0.5) }) ?? true {
+                left = line
+            }
+            if rightCount <= tolerance, leftCount >= minimumFeet, right.map({ center > $0.x(atY: 0.5) }) ?? true {
+                right = line
+            }
+        }
+
+        var result: [FieldLine] = []
+        let frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+
+        // タッチラインは、ゴールラインがあればそこまで、なければ画面の端まで
+        for touchline in [far, near].compactMap({ $0 }) {
+            var start = CGPoint(x: 0, y: touchline.y(atX: 0))
+            var end = CGPoint(x: 1, y: touchline.y(atX: 1))
+            if let left, let corner = touchline.intersection(with: left), corner.x > 0 { start = corner }
+            if let right, let corner = touchline.intersection(with: right), corner.x < 1 { end = corner }
+            if let clipped = clip(FieldLine(start: start, end: end), to: frame) { result.append(clipped) }
+        }
+
+        // ゴールラインは、タッチラインの間だけ（なければ画面の端まで）
+        for goalLine in [left, right].compactMap({ $0 }) {
+            var start = CGPoint(x: goalLine.x(atY: 0), y: 0)
+            var end = CGPoint(x: goalLine.x(atY: 1), y: 1)
+            if let far, let corner = goalLine.intersection(with: far), corner.y > 0 { start = corner }
+            if let near, let corner = goalLine.intersection(with: near), corner.y < 1 { end = corner }
+            if let clipped = clip(FieldLine(start: start, end: end), to: frame) { result.append(clipped) }
+        }
+        return result
+    }
+
+    private static func isHorizontal(_ line: Line, aspect: Double) -> Bool {
+        let angle = line.angle(aspect: aspect)
+        return angle < horizontalLimit || angle > 180 - horizontalLimit
+    }
+
+    /// 線分を画面の中に収める（Liang–Barsky）
+    private static func clip(_ segment: FieldLine, to rect: CGRect) -> FieldLine? {
+        let x0 = Double(segment.start.x), y0 = Double(segment.start.y)
+        let dx = Double(segment.end.x) - x0, dy = Double(segment.end.y) - y0
+        var t0 = 0.0, t1 = 1.0
+        let checks: [(Double, Double)] = [
+            (-dx, x0 - Double(rect.minX)), (dx, Double(rect.maxX) - x0),
+            (-dy, y0 - Double(rect.minY)), (dy, Double(rect.maxY) - y0),
+        ]
+        for (p, q) in checks {
+            if abs(p) < 1e-12 {
+                if q < 0 { return nil }
+            } else {
+                let r = q / p
+                if p < 0 { t0 = max(t0, r) } else { t1 = min(t1, r) }
+            }
+        }
+        guard t0 < t1 else { return nil }
+        return FieldLine(
+            start: CGPoint(x: x0 + dx * t0, y: y0 + dy * t0),
+            end: CGPoint(x: x0 + dx * t1, y: y0 + dy * t1)
+        )
     }
 }
