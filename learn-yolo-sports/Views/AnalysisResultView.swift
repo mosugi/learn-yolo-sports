@@ -20,6 +20,8 @@ struct AnalysisResultView: View {
 
     @State private var player = AVPlayer()
     @State private var currentTime: Double = 0
+    /// 直前にシーンの移動で移った時刻（移動直後の再生位置のずれを吸収する）
+    @State private var sceneJumpTarget: Double?
     /// 動画に重ねるもの（設定は保存する）
     @AppStorage("showPlayerBoxes") private var showPlayers = true
     @AppStorage("showTacticalAdvice") private var showAdvice = true
@@ -383,26 +385,39 @@ struct AnalysisResultView: View {
         (record.segments ?? []).sorted { $0.startTime < $1.startTime }
     }
 
-    /// シーンの始めに移動した直後でも前のシーンと取り違えないための余裕（秒）
+    /// シーンの始めに移動した直後、再生位置が少し手前と報告されても移動先のシーンとみなす余裕（秒）
     private static let sceneTimeTolerance = 0.25
+
+    /// シーンの移動に使う再生位置
+    ///
+    /// シーンへ移動した直後は、再生位置が移動先の少し手前と報告されることがあるため、移動先の時刻とみなす。
+    /// それ以外のとき（再生中にシーンの境目に近づいたときなど）は再生位置そのままにして、次のシーンを飛ばさないようにする。
+    private var navigationTime: Double {
+        if let sceneJumpTarget, currentTime < sceneJumpTarget, sceneJumpTarget - currentTime <= Self.sceneTimeTolerance {
+            return sceneJumpTarget
+        }
+        return currentTime
+    }
 
     /// 再生位置のシーン（シーンの間にいるときは直前のシーン）
     ///
     /// シーンの終わりと次のシーンの始めが同じ時刻のことがあるため、始まりの時刻だけで決める。
     private var currentSceneIndex: Int? {
-        sortedSegments.lastIndex(where: { $0.startTime <= currentTime + Self.sceneTimeTolerance })
+        let time = navigationTime
+        return sortedSegments.lastIndex(where: { $0.startTime <= time })
     }
 
     /// 再生位置より後に始まる最初のシーン
     private var nextScene: SceneSegment? {
-        sortedSegments.first { $0.startTime > currentTime + Self.sceneTimeTolerance }
+        let time = navigationTime
+        return sortedSegments.first { $0.startTime > time }
     }
 
     /// シーンの始めから 3 秒以上たっていればそのシーンの始め、そうでなければ前のシーン
     private var previousScene: SceneSegment? {
         let segments = sortedSegments
         guard let index = currentSceneIndex else { return nil }
-        if currentTime - segments[index].startTime > 3 || index == 0 {
+        if navigationTime - segments[index].startTime > 3 || index == 0 {
             return segments[index]
         }
         return segments[index - 1]
@@ -419,6 +434,7 @@ struct AnalysisResultView: View {
                     jumpToPreviousScene()
                 } label: {
                     Label("前のシーン", systemImage: "backward.end.fill")
+                        .labelStyle(.iconOnly)
                         .frame(height: 36)
                 }
                 .buttonStyle(.bordered)
@@ -441,12 +457,12 @@ struct AnalysisResultView: View {
                     jumpToNextScene()
                 } label: {
                     Label("次のシーン", systemImage: "forward.end.fill")
+                        .labelStyle(.iconOnly)
                         .frame(height: 36)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(nextScene == nil)
             }
-            .labelStyle(.iconOnly)
         }
     }
 
@@ -484,6 +500,7 @@ struct AnalysisResultView: View {
         shownMoments.remove(segment.id)
         if videoURL != nil {
             seek(to: segment.startTime)
+            sceneJumpTarget = segment.startTime
             player.play()
         } else {
             jump(to: segment.keyTime)
@@ -535,6 +552,7 @@ struct AnalysisResultView: View {
     private func seek(to time: Double) {
         player.seek(to: CMTime(seconds: time, preferredTimescale: 600))
         currentTime = time
+        sceneJumpTarget = nil
     }
 
     /// 白線とボール周辺の空いた場所
