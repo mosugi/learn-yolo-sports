@@ -118,8 +118,11 @@ struct AnalysisResultView: View {
         GeometryReader { geo in
             ZStack {
                 VideoPlayer(player: player)
-                if showOverlay, let frame = nearestFrame(to: currentTime) {
+                // 白線とスペースは、検出枠の表示とは別に切り替える
+                if let frame = nearestFrame(to: currentTime) {
                     fieldOverlay(for: frame, size: geo.size)
+                }
+                if showOverlay, let frame = nearestFrame(to: currentTime) {
                     DetectionOverlayView(
                         detections: frame.detections,
                         teams: record.teams,
@@ -244,11 +247,18 @@ struct AnalysisResultView: View {
     /// 表示中のフレームに最も近い、白線を求めたフレーム（1 秒ごと）の白線
     ///
     /// 間のフレームでは、カメラの動きの分だけ白線をずらして重ねる。
+    /// 画面が切り替わった所をまたぐとずらしても合わないため、同じ場面のフレームだけを使う。
     private func fieldLines(near frame: SavedFrame) -> (lines: [FieldLine], shift: CGPoint)? {
+        func crossesSceneCut(_ source: SavedFrame) -> Bool {
+            let earlier = min(source.timestamp, frame.timestamp)
+            let later = max(source.timestamp, frame.timestamp)
+            // sceneCut は直前のフレームとの間で切り替わったことを表す
+            return record.frames.contains { $0.timestamp > earlier && $0.timestamp <= later && $0.sceneCut == true }
+        }
         guard let source = record.frames
-            .filter({ $0.fieldLines?.isEmpty == false })
-            .min(by: { abs($0.timestamp - frame.timestamp) < abs($1.timestamp - frame.timestamp) }),
-              abs(source.timestamp - frame.timestamp) <= 1.0,
+            .filter({ $0.fieldLines?.isEmpty == false && abs($0.timestamp - frame.timestamp) <= 1.0 })
+            .sorted(by: { abs($0.timestamp - frame.timestamp) < abs($1.timestamp - frame.timestamp) })
+            .first(where: { !crossesSceneCut($0) }),
               let lines = source.fieldLines else { return nil }
         // 画面上の位置 + カメラの移動量 = 動画全体で共通の位置
         let from = source.cameraOffset ?? .zero
