@@ -43,6 +43,10 @@ struct AnalysisResultView: View {
     @State private var digestSegmentID: SceneSegment.ID?
     /// 試合の流れ（実況の出来事・ボール保持率）
     @State private var playByPlay: MatchPlayByPlay?
+    /// ピッチを真上から見た選手の位置と、ゴールの位置
+    @State private var radar: PitchRadar?
+    /// 見つけたゴールを動画に重ねる
+    @AppStorage("showGoals") private var showGoals = true
     /// 動画の上に実況の一言を出す
     @AppStorage("showPlayByPlay") private var showPlayByPlay = true
     /// コートの白線・ボール周辺の空いた場所を表示するか
@@ -169,6 +173,9 @@ struct AnalysisResultView: View {
             playByPlay = await Task.detached(priority: .userInitiated) {
                 MatchPlayByPlay(record: record)
             }.value
+            radar = await Task.detached(priority: .userInitiated) {
+                PitchRadar(record: record)
+            }.value
         }
         .onDisappear { teardownPlayer() }
     }
@@ -234,6 +241,10 @@ struct AnalysisResultView: View {
                     return seconds.isFinite ? seconds : 0
                 }
             }
+            // 見つけたゴールの枠
+            if showGoals, let radar, !radar.goals.isEmpty, let frame = nearestFrame(to: currentTime) {
+                GoalOverlayView(radar: radar, frame: frame, displaySize: size)
+            }
             // 実況の一言（直前の出来事）
             if showPlayByPlay, let event = playByPlay?.latestEvent(at: currentTime) {
                 playByPlayCaption(event)
@@ -258,6 +269,7 @@ struct AnalysisResultView: View {
             Section("動画に重ねる") {
                 Toggle("選手（検出枠）", isOn: $showPlayers)
                 Toggle("コートの白線", isOn: $showFieldLines)
+                Toggle("ゴール", isOn: $showGoals)
                 Toggle("空いたスペース（点線）", isOn: $showOpenSpaces)
                 Toggle("アドバイス（選択肢の矢印）", isOn: $showAdvice)
                 Toggle("実況の一言", isOn: $showPlayByPlay)
@@ -805,35 +817,30 @@ struct AnalysisResultView: View {
     // MARK: - Bird's-eye view
 
     /// 表示中の場面を真上から見た図
-    @ViewBuilder
     private var birdsEyeSection: some View {
-        if let frame = nearestFrame(to: currentTime) {
-            let lines = showFieldLines ? fieldLines(near: frame) : nil
-            let segment = currentSegment
-            let tactics = segment?.tactics.flatMap { tactics in
-                showAdvice && (telestration?.segmentID == segment?.id || abs(currentTime - tactics.timestamp) <= 1.0) ? tactics : nil
+        VStack(alignment: .leading, spacing: 8) {
+            Label("俯瞰図", systemImage: "square.grid.3x3.topleft.filled")
+                .font(.headline)
+            if let radar {
+                PitchRadarView(radar: radar, teams: record.teams, focusedPlayerID: focusPath?.playerID) {
+                    guard videoURL != nil else { return currentTime }
+                    let seconds = CMTimeGetSeconds(player.currentTime())
+                    return seconds.isFinite ? seconds : currentTime
+                }
+                Text(radar.goals.isEmpty
+                     ? "選手の写る大きさとカメラの向きの動きから推定した位置の目安です。左右は動画と同じ向きです。"
+                     : "選手の写る大きさとカメラの向きの動きから推定した位置の目安です。黄色のゴールは、GK の位置から見つけたゴールです。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("選手が少ないため、俯瞰図を作れませんでした。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                Label("俯瞰図", systemImage: "square.grid.3x3.topleft.filled")
-                    .font(.headline)
-                BirdsEyeView(
-                    frame: frame,
-                    teams: record.teams,
-                    players: record.players,
-                    aspectRatio: Double(videoAspectRatio),
-                    lines: lines?.lines ?? [],
-                    lineShift: lines?.shift ?? .zero,
-                    spaces: showOpenSpaces ? SpaceFinder.spaces(in: frame, aspectRatio: Double(videoAspectRatio)) : [],
-                    tactics: tactics,
-                    recommendedOptionID: segment?.recommendedOptionID,
-                    focusedPlayerID: focusPath?.playerID
-                )
-                .frame(height: 220)
-            }
-            .padding()
-            .background(Color(.secondarySystemBackground))
-            .cornerRadius(12)
         }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(12)
     }
 
     private func teardownPlayer() {
@@ -884,7 +891,11 @@ struct AnalysisResultView: View {
             .filter({ $0.fieldLines?.isEmpty == false && abs($0.timestamp - frame.timestamp) <= 1.0 })
             .sorted(by: { abs($0.timestamp - frame.timestamp) < abs($1.timestamp - frame.timestamp) })
             .first(where: { !crossesSceneCut($0) }),
-              let lines = source.fieldLines else { return nil }
+              let stored = source.fieldLines else { return nil }
+        // 古い記録は見つけた線をすべて保存しているため、表示するときにも外枠（各辺 1 本）だけを選ぶ
+        let feet = (source.detections(of: .player) + source.detections(of: .goalkeeper)).map(\.footPoint)
+        let lines = stored.count > 4 ? FieldBoundary.select(from: stored, feet: feet, aspect: Double(videoAspectRatio)) : stored
+        guard !lines.isEmpty else { return nil }
         // 画面上の位置 + カメラの移動量 = 動画全体で共通の位置
         let from = source.cameraOffset ?? .zero
         let to = frame.cameraOffset ?? .zero
