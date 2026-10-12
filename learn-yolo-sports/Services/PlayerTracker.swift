@@ -78,7 +78,7 @@ nonisolated enum PlayerTracker {
     /// 色が食い違う観測を対応付けるときに足す距離（身長単位）
     static let colorConflictPenalty = 1.5
     /// 追跡・識別の方式の版。変えたときは上げる（保存済みの検出結果から識別をやり直す目安になる）
-    static let version = 4
+    static let version = 5
 
     /// 前回の追跡・識別の結果を外してから、追跡・識別をやり直してフレームに書き込む
     static func retrack(

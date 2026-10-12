@@ -8,10 +8,17 @@
 import SwiftUI
 
 /// 選択肢を番号付きの矢印で描くオーバーレイ（正規化座標の TacticalSnapshot を使う）
-struct TacticalArrowsView: View {
+struct TacticalArrowsView: View, Animatable {
     let snapshot: TacticalSnapshot
     let recommendedOptionID: Int?
     let displaySize: CGSize
+    /// 矢印を描く割合（0〜1）。アニメーションで 0 から 1 にすると、矢印が伸びていくように描かれる
+    var progress: Double = 1
+
+    var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
 
     private static let recommendedColor = Color.yellow
     private static let otherColor = Color.white
@@ -24,10 +31,15 @@ struct TacticalArrowsView: View {
                 for option in ordered {
                     let isRecommended = option.id == recommendedOptionID
                     let color = isRecommended ? Self.recommendedColor : Self.otherColor.opacity(0.85)
+                    let from = point(option.from, in: size)
+                    let to = point(option.to, in: size)
+                    // おすすめは他の矢印より少し遅れて伸ばし、目に留まるようにする
+                    let local = isRecommended ? max(0, min(1, (progress - 0.25) / 0.75)) : min(1, progress / 0.75)
+                    guard local > 0 else { continue }
                     drawArrow(
                         in: &context,
-                        from: point(option.from, in: size),
-                        to: point(option.to, in: size),
+                        from: from,
+                        to: CGPoint(x: from.x + (to.x - from.x) * local, y: from.y + (to.y - from.y) * local),
                         color: color,
                         lineWidth: isRecommended ? 4 : 2.5,
                         dashed: option.kind == .dribble
@@ -47,6 +59,8 @@ struct TacticalArrowsView: View {
                     .frame(width: 22, height: 22)
                     .background(Circle().fill(isRecommended ? Self.recommendedColor : Self.otherColor))
                     .foregroundStyle(.black)
+                    .scaleEffect(progress >= 1 && isRecommended ? 1.15 : 1)
+                    .opacity(progress >= 1 ? 1 : 0)
                     .position(point(option.to, in: displaySize))
             }
         }

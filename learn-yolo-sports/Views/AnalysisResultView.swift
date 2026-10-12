@@ -20,7 +20,20 @@ struct AnalysisResultView: View {
 
     @State private var player = AVPlayer()
     @State private var currentTime: Double = 0
-    @State private var showOverlay = true
+    /// 動画に重ねるもの（設定は保存する）
+    @AppStorage("showPlayerBoxes") private var showPlayers = true
+    @AppStorage("showTacticalAdvice") private var showAdvice = true
+    @AppStorage("pauseAtAdvice") private var pauseAtAdvice = true
+    @AppStorage("showBirdsEye") private var showBirdsEye = false
+    /// 注目時点で一時停止して解説している場面
+    @State private var adviceMoment: SceneSegment.ID?
+    /// 解説した場面（同じ再生で何度も止めないため）
+    @State private var shownMoments: Set<SceneSegment.ID> = []
+    /// 解説中の矢印を描く割合（0 から 1 へアニメーションする）
+    @State private var arrowProgress = 1.0
+    /// コートの白線・ボール周辺の空いた場所を表示するか
+    @AppStorage("showFieldLines") private var showFieldLines = true
+    @AppStorage("showOpenSpaces") private var showOpenSpaces = true
     @State private var timeObserver: Any?
     /// マーカーを付け続ける選手の位置
     @State private var focusPath: PlayerFocusPath?
@@ -63,6 +76,13 @@ struct AnalysisResultView: View {
                             timelineBar(duration: duration)
                                 .padding(.horizontal)
                         }
+                        sceneNavigator
+                            .padding(.horizontal)
+                        if let segment = adviceMomentSegment {
+                            adviceMomentCard(segment)
+                                .padding(.horizontal)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
                         if focusPath == nil, record.players?.isEmpty == false {
                             Label("選手の枠をタップすると、その選手を追いかけて動きのアドバイスを作成します", systemImage: "hand.tap")
                                 .font(.caption)
@@ -72,6 +92,11 @@ struct AnalysisResultView: View {
                         }
                     } else {
                         legacyFrameBrowser
+                    }
+
+                    if showBirdsEye {
+                        birdsEyeSection
+                            .padding(.horizontal)
                     }
 
                     commentarySection
@@ -115,7 +140,11 @@ struct AnalysisResultView: View {
         GeometryReader { geo in
             ZStack {
                 VideoPlayer(player: player)
-                if showOverlay, let frame = nearestFrame(to: currentTime) {
+                // 白線とスペースは、検出枠の表示とは別に切り替える
+                if let frame = nearestFrame(to: currentTime) {
+                    fieldOverlay(for: frame, size: geo.size)
+                }
+                if showPlayers, let frame = nearestFrame(to: currentTime) {
                     DetectionOverlayView(
                         detections: frame.detections,
                         teams: record.teams,
@@ -132,21 +161,35 @@ struct AnalysisResultView: View {
                         return seconds.isFinite ? seconds : 0
                     }
                 }
-                // 注目時点の前後では選択肢の矢印も重ねる
-                if showOverlay, let segment = currentSegment, let tactics = segment.tactics,
-                   abs(currentTime - tactics.timestamp) <= 1.0 {
-                    TacticalArrowsView(snapshot: tactics, recommendedOptionID: segment.recommendedOptionID, displaySize: geo.size)
-                        .allowsHitTesting(false)
+                // 注目時点の前後では選択肢の矢印も重ねる（解説中は矢印が伸びていくように描く）
+                if showAdvice, let segment = currentSegment, let tactics = segment.tactics,
+                   adviceMoment == segment.id || abs(currentTime - tactics.timestamp) <= 1.0 {
+                    TacticalArrowsView(
+                        snapshot: tactics,
+                        recommendedOptionID: segment.recommendedOptionID,
+                        displaySize: geo.size,
+                        progress: adviceMoment == segment.id ? arrowProgress : 1
+                    )
+                    .allowsHitTesting(false)
                 }
             }
         }
         .aspectRatio(videoAspectRatio, contentMode: .fit)
         .background(Color.black)
         .overlay(alignment: .topTrailing) {
-            Button {
-                showOverlay.toggle()
+            Menu {
+                Section("動画に重ねる") {
+                    Toggle("選手（検出枠）", isOn: $showPlayers)
+                    Toggle("コートの白線", isOn: $showFieldLines)
+                    Toggle("空いたスペース（点線）", isOn: $showOpenSpaces)
+                    Toggle("アドバイス（選択肢の矢印）", isOn: $showAdvice)
+                }
+                Section {
+                    Toggle("注目場面で止めて解説", isOn: $pauseAtAdvice)
+                    Toggle("俯瞰図", isOn: $showBirdsEye)
+                }
             } label: {
-                Image(systemName: showOverlay ? "eye.fill" : "eye.slash")
+                Image(systemName: showPlayers || showFieldLines || showOpenSpaces || showAdvice ? "eye.fill" : "eye.slash")
                     .padding(8)
                     .background(.black.opacity(0.5))
                     .foregroundStyle(.white)
@@ -208,7 +251,245 @@ struct AnalysisResultView: View {
             forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
             queue: .main
         ) { time in
+            let previous = currentTime
             currentTime = CMTimeGetSeconds(time)
+            pauseAtAdviceMomentIfNeeded(from: previous, to: currentTime)
+        }
+    }
+
+    // MARK: - Advice moment
+
+    private var adviceMomentSegment: SceneSegment? {
+        adviceMoment.flatMap { id in record.segments?.first { $0.id == id } }
+    }
+
+    /// 再生中に注目時点を通り過ぎたら、一時停止して矢印を伸ばしながら解説する
+    private func pauseAtAdviceMomentIfNeeded(from previous: Double, to now: Double) {
+        // シークで大きく飛んだときは止めない
+        guard showAdvice, pauseAtAdvice, adviceMoment == nil, player.rate > 0,
+              now > previous, now - previous < 2 else { return }
+        guard let segment = record.segments?.first(where: { segment in
+            guard let tactics = segment.tactics, !tactics.options.isEmpty else { return false }
+            return tactics.timestamp > previous && tactics.timestamp <= now && !shownMoments.contains(segment.id)
+        }), let tactics = segment.tactics else { return }
+
+        player.pause()
+        seek(to: tactics.timestamp)
+        shownMoments.insert(segment.id)
+        arrowProgress = 0
+        withAnimation(.spring(duration: 0.4)) {
+            adviceMoment = segment.id
+        }
+        withAnimation(.easeOut(duration: 1.4).delay(0.2)) {
+            arrowProgress = 1
+        }
+    }
+
+    private func replayAdviceAnimation() {
+        arrowProgress = 0
+        withAnimation(.easeOut(duration: 1.4)) {
+            arrowProgress = 1
+        }
+    }
+
+    private func resumeAfterAdvice() {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            adviceMoment = nil
+        }
+        player.play()
+    }
+
+    /// 一時停止した注目時点の解説（おすすめの選択肢と理由）
+    private func adviceMomentCard(_ segment: SceneSegment) -> some View {
+        let tactics = segment.tactics
+        let recommended = tactics?.options.first(where: { $0.id == segment.recommendedOptionID })
+        let recommendedComment = recommended.flatMap { comment(for: $0, in: segment) }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "lightbulb.fill")
+                    .foregroundStyle(.yellow)
+                Text(segment.commentary?.headline ?? segment.title)
+                    .font(.headline)
+                Spacer()
+                Text(DurationText.clock(tactics?.timestamp ?? segment.keyTime))
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+
+            if let recommended {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("\(recommended.id)")
+                        .font(.caption.bold())
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.yellow))
+                        .foregroundStyle(.black)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("おすすめ: \(recommended.summary)")
+                            .font(.subheadline.bold())
+                        if let recommendedComment {
+                            Text(recommendedComment)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            if let suggestion = segment.commentary?.suggestion {
+                Label(suggestion, systemImage: "quote.bubble")
+                    .font(.subheadline)
+            }
+
+            HStack {
+                Button {
+                    replayAdviceAnimation()
+                } label: {
+                    Label("もう一度", systemImage: "arrow.counterclockwise")
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+                Button {
+                    resumeAfterAdvice()
+                } label: {
+                    Label("続きを再生", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .font(.subheadline)
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.yellow.opacity(0.6), lineWidth: 1.5))
+        .cornerRadius(12)
+    }
+
+    /// 選択肢への AI の評価（選択肢と同じ順番で保存している）
+    private func comment(for option: TacticalOption, in segment: SceneSegment) -> String? {
+        guard let comments = segment.commentary?.optionComments,
+              let index = segment.tactics?.options.firstIndex(where: { $0.id == option.id }),
+              comments.indices.contains(index) else { return nil }
+        return comments[index]
+    }
+
+    // MARK: - Scene navigation
+
+    private var sortedSegments: [SceneSegment] {
+        (record.segments ?? []).sorted { $0.startTime < $1.startTime }
+    }
+
+    /// 再生位置のシーン（シーンの間にいるときは直前のシーン）
+    private var currentSceneIndex: Int? {
+        let segments = sortedSegments
+        if let current = currentSegment, let index = segments.firstIndex(where: { $0.id == current.id }) {
+            return index
+        }
+        return segments.lastIndex(where: { $0.startTime <= currentTime })
+    }
+
+    /// 前後のシーンへ移動するボタン
+    @ViewBuilder
+    private var sceneNavigator: some View {
+        let segments = sortedSegments
+        if !segments.isEmpty {
+            let index = currentSceneIndex
+            HStack(spacing: 12) {
+                Button {
+                    jumpToPreviousScene()
+                } label: {
+                    Label("前のシーン", systemImage: "backward.end.fill")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 44, height: 36)
+                }
+                .buttonStyle(.bordered)
+                .disabled(index == nil)
+
+                VStack(spacing: 2) {
+                    Text(index.map { "シーン \($0 + 1) / \(segments.count)" } ?? "シーン \(segments.count) 件")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    if let index {
+                        Label(segments[index].commentary?.headline ?? segments[index].title, systemImage: segments[index].kind.systemImage)
+                            .font(.subheadline)
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+
+                Button {
+                    jumpToNextScene()
+                } label: {
+                    Label("次のシーン", systemImage: "forward.end.fill")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 44, height: 36)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled((index ?? -1) >= segments.count - 1)
+            }
+        }
+    }
+
+    private func jumpToNextScene() {
+        let segments = sortedSegments
+        let next = currentSceneIndex.map { $0 + 1 } ?? segments.firstIndex(where: { $0.startTime > currentTime })
+        guard let next, segments.indices.contains(next) else { return }
+        jumpToScene(segments[next])
+    }
+
+    /// シーンの始めから 3 秒以上たっていればそのシーンの始めへ、そうでなければ前のシーンへ
+    private func jumpToPreviousScene() {
+        let segments = sortedSegments
+        guard let index = currentSceneIndex else { return }
+        if currentTime - segments[index].startTime > 3 || index == 0 {
+            jumpToScene(segments[index])
+        } else {
+            jumpToScene(segments[index - 1])
+        }
+    }
+
+    private func jumpToScene(_ segment: SceneSegment) {
+        adviceMoment = nil
+        // 移動したシーンでは、注目時点でもう一度止めて解説する
+        shownMoments.remove(segment.id)
+        if videoURL != nil {
+            seek(to: segment.startTime)
+            player.play()
+        } else {
+            jump(to: segment.keyTime)
+        }
+    }
+
+    // MARK: - Bird's-eye view
+
+    /// 表示中の場面を真上から見た図
+    @ViewBuilder
+    private var birdsEyeSection: some View {
+        if let frame = nearestFrame(to: currentTime) {
+            let lines = showFieldLines ? fieldLines(near: frame) : nil
+            let segment = currentSegment
+            let tactics = segment?.tactics.flatMap { tactics in
+                showAdvice && (adviceMoment == segment?.id || abs(currentTime - tactics.timestamp) <= 1.0) ? tactics : nil
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Label("俯瞰図", systemImage: "square.grid.3x3.topleft.filled")
+                    .font(.headline)
+                BirdsEyeView(
+                    frame: frame,
+                    teams: record.teams,
+                    players: record.players,
+                    aspectRatio: Double(videoAspectRatio),
+                    lines: lines?.lines ?? [],
+                    lineShift: lines?.shift ?? .zero,
+                    spaces: showOpenSpaces ? SpaceFinder.spaces(in: frame, aspectRatio: Double(videoAspectRatio)) : [],
+                    tactics: tactics,
+                    recommendedOptionID: segment?.recommendedOptionID,
+                    focusedPlayerID: focusPath?.playerID
+                )
+                .frame(height: 220)
+            }
+            .padding()
+            .background(Color(.secondarySystemBackground))
+            .cornerRadius(12)
         }
     }
 
@@ -223,6 +504,38 @@ struct AnalysisResultView: View {
     private func seek(to time: Double) {
         player.seek(to: CMTime(seconds: time, preferredTimescale: 600))
         currentTime = time
+    }
+
+    /// 白線とボール周辺の空いた場所
+    @ViewBuilder
+    private func fieldOverlay(for frame: SavedFrame, size: CGSize) -> some View {
+        let lines = showFieldLines ? fieldLines(near: frame) : nil
+        let spaces = showOpenSpaces ? SpaceFinder.spaces(in: frame, aspectRatio: Double(videoAspectRatio)) : []
+        if lines != nil || !spaces.isEmpty {
+            FieldOverlayView(lines: lines?.lines ?? [], lineShift: lines?.shift ?? .zero, spaces: spaces, displaySize: size)
+        }
+    }
+
+    /// 表示中のフレームに最も近い、白線を求めたフレーム（1 秒ごと）の白線
+    ///
+    /// 間のフレームでは、カメラの動きの分だけ白線をずらして重ねる。
+    /// 画面が切り替わった所をまたぐとずらしても合わないため、同じ場面のフレームだけを使う。
+    private func fieldLines(near frame: SavedFrame) -> (lines: [FieldLine], shift: CGPoint)? {
+        func crossesSceneCut(_ source: SavedFrame) -> Bool {
+            let earlier = min(source.timestamp, frame.timestamp)
+            let later = max(source.timestamp, frame.timestamp)
+            // sceneCut は直前のフレームとの間で切り替わったことを表す
+            return record.frames.contains { $0.timestamp > earlier && $0.timestamp <= later && $0.sceneCut == true }
+        }
+        guard let source = record.frames
+            .filter({ $0.fieldLines?.isEmpty == false && abs($0.timestamp - frame.timestamp) <= 1.0 })
+            .sorted(by: { abs($0.timestamp - frame.timestamp) < abs($1.timestamp - frame.timestamp) })
+            .first(where: { !crossesSceneCut($0) }),
+              let lines = source.fieldLines else { return nil }
+        // 画面上の位置 + カメラの移動量 = 動画全体で共通の位置
+        let from = source.cameraOffset ?? .zero
+        let to = frame.cameraOffset ?? .zero
+        return (lines, CGPoint(x: from.x - to.x, y: from.y - to.y))
     }
 
     private func nearestFrame(to time: Double) -> SavedFrame? {
@@ -580,6 +893,7 @@ struct AnalysisResultView: View {
                     }
                     if legacyFrames.indices.contains(selectedFrameIndex) {
                         let frame = legacyFrames[selectedFrameIndex]
+                        fieldOverlay(for: frame, size: geo.size)
                         DetectionOverlayView(
                             detections: frame.detections,
                             teams: record.teams,
