@@ -127,6 +127,15 @@ nonisolated struct PlayerAdvice: Codable, Hashable {
     let generatedAt: Date
 }
 
+/// AI による試合の解説（実況・解説者の視点で試合の流れを伝える。改善の提案は含まない）
+nonisolated struct MatchReport: Codable, Hashable {
+    let headline: String
+    let story: String
+    /// 見どころ（時刻付きの短い文）
+    let highlights: [String]
+    let generatedAt: Date
+}
+
 /// 保存された解析結果
 nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     let id: UUID
@@ -157,6 +166,8 @@ nonisolated struct SavedAnalysis: Codable, Hashable, Identifiable {
     var adviceUnavailableReason: String? = nil
     /// 選手ごとのアドバイス（指定された選手の分だけ）
     var playerAdvice: [PlayerAdvice]? = nil
+    /// AI による試合の解説（試合の流れを伝えるもの。表示したときに作る）
+    var matchReport: MatchReport? = nil
     /// 選手の識別に使った1チームの人数（古い記録は nil）
     var playersPerTeam: Int? = nil
     /// 同じ動画を選び直したときに見分けるための目印（古い記録は nil）
