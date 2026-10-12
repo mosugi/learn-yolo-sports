@@ -165,7 +165,7 @@ nonisolated enum Telestrator {
                 kind: .situation,
                 time: t0,
                 frameNumber: frame0.frameNumber,
-                caption: "\(who.isEmpty ? "攻撃側" : who)がボールを持っています",
+                caption: situationCaption(for: segment, who: who.isEmpty ? "攻撃側" : who, record: record),
                 detail: details.isEmpty ? nil : details.joined(separator: "\n"),
                 marks: marks,
                 hold: 5
@@ -331,6 +331,22 @@ nonisolated enum Telestrator {
             }
         }
 
+        // 最後の手順で、良かったプレーを褒める
+        if let praise = segment.commentary?.praise, let last = steps.indices.last {
+            let step = steps[last]
+            steps[last] = TelestrationStep(
+                kind: step.kind,
+                time: step.time,
+                frameNumber: step.frameNumber,
+                playback: step.playback,
+                follows: step.follows,
+                caption: step.caption,
+                detail: ["良かった点: \(praise)", step.detail].compactMap { $0 }.joined(separator: "\n"),
+                marks: step.marks,
+                hold: step.hold + 2
+            )
+        }
+
         guard steps.count >= 2 else { return nil }
         return TelestrationScript(segmentID: segment.id, steps: steps, resumeTime: outcome?.time ?? t0)
     }
@@ -431,6 +447,19 @@ nonisolated enum Telestrator {
     private static func countText(_ count: Int) -> String {
         let words = ["", "一つ", "二つ", "三つ"]
         return words.indices.contains(count) ? words[count] : "\(count)つ"
+    }
+
+    /// 状況の一言（攻守の切り替え・得点の場面は、そのことから伝える）
+    private static func situationCaption(for segment: SceneSegment, who: String, record: SavedAnalysis) -> String {
+        let teamName = record.team(id: segment.team)?.name
+        switch segment.kind {
+        case .transition:
+            return "攻守の切り替え。\(teamName.map { "\($0)が奪って、" } ?? "")\(who)がボールを持っています"
+        case .goal:
+            return "\(teamName.map { "\($0)の" } ?? "")得点につながった場面。\(who)がボールを持っています"
+        default:
+            return "\(who)がボールを持っています"
+        }
     }
 
     /// 「ここで右奥の#7へ出していれば」のような、別解の言い方

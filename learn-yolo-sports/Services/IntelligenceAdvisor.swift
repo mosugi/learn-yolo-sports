@@ -38,6 +38,9 @@ nonisolated struct GeneratedSceneCommentary {
 
     @Guide(description: "最もおすすめする選択肢の候補番号。候補がなければ0")
     var recommendedOption: Int
+
+    @Guide(description: "この場面で良かったプレーを具体的に褒める1文の日本語。選手の呼び名やチーム名に触れる")
+    var praise: String
 }
 
 /// オンデバイス LLM に生成させる選手個人へのアドバイスの構造
@@ -73,7 +76,7 @@ nonisolated struct GeneratedMatchReport {
 nonisolated enum IntelligenceAdvisor {
 
     /// 指示文・入力の版。変えたときは上げる（同じ動画を選び直したときに AI の文章を作り直す目安になる）
-    static let promptVersion = 2
+    static let promptVersion = 3
 
     private static let instructions = """
         あなたはサッカーの戦術コーチです。
@@ -82,6 +85,7 @@ nonisolated enum IntelligenceAdvisor {
         動画はサイドライン側から撮影したもので、両チームのゴールは画面の左右にあり、攻撃は画面の左右方向です。
         両チームの人数は常に同じです。画面に写る人数の差はカメラの向きによるもので、チームの人数の差や人数を増やす提案として述べないでください。
         検出には見逃しや誤検出も含まれます。数値から言えることだけを述べ、断定しすぎないでください。
+        改善点だけでなく、良かったプレーは具体的に褒めてください。選手が前向きに受け止められる言葉を選んでください。
         """
 
     /// 試合の解説用（改善の提案はせず、何が起きたかを伝える）
@@ -89,9 +93,10 @@ nonisolated enum IntelligenceAdvisor {
         あなたはサッカー中継の解説者です。
         試合動画を物体検出・追跡して得た出来事の記録をもとに、試合の流れを視聴者に伝える解説を日本語で返してください。
         改善の提案やアドバイスはせず、どちらのチームがどう攻め、どこで流れが変わったかを、落ち着いた口調で伝えてください。
+        ボールを奪った場面や得点など、見事なプレーは称えてください。得点は重要シーンに「得点」とあるものだけです。
         ユニフォームの色でチームを自動判定し、選手は背番号（#10 など）または記号（A, B など）で呼んでいます。
         動画はサイドライン側から撮影したもので、両チームのゴールは画面の左右にあります。両チームの人数は常に同じです。
-        ボールの持ち主はボールに最も近い選手から推定しており、見逃しや誤りも含まれます。記録にないことは述べず、得点が記録にない場合は得点に触れないでください。
+        ボールの持ち主はボールに最も近い選手から推定しており、見逃しや誤りも含まれます。記録にないことは述べず、得点のシーンがない場合は得点に触れないでください。
         """
 
     /// 端末で Apple Intelligence を利用できない場合の理由（利用できる場合は nil）
@@ -144,7 +149,8 @@ nonisolated enum IntelligenceAdvisor {
             commentary: generated.commentary,
             suggestion: generated.suggestion,
             optionComments: comments,
-            recommendedOptionID: recommended
+            recommendedOptionID: recommended,
+            praise: generated.praise.isEmpty ? nil : generated.praise
         )
     }
 
@@ -225,7 +231,17 @@ nonisolated enum IntelligenceAdvisor {
     private static func scenePrompt(segment: SceneSegment, metrics: AnalysisMetrics, teams: [TeamInfo]?, usedRealModel: Bool) -> String {
         var lines: [String] = []
         lines.append("以下はサッカー動画の \(Int(segment.startTime))秒〜\(Int(segment.endTime))秒（注目時点 \(Int(segment.keyTime))秒）の物体検出から算出した指標です。")
-        lines.append("場面の種類（スコアからの機械的な分類）: \(segment.kind.japaneseName)")
+        let teamName = teams?.first { $0.id == segment.team }?.name
+        switch segment.kind {
+        case .transition:
+            lines.append("場面の種類: 攻守の切り替え（\(teamName ?? "一方のチーム")がボールを奪った直後）")
+            lines.append("奪ったチームの切り替えの速さや奪った後の判断、奪われたチームの守備への切り替えに触れてください。")
+        case .goal:
+            lines.append("場面の種類: \(teamName ?? "一方のチーム")の得点シーン（利用者が得点を記録した場面。得点の約12秒前から）")
+            lines.append("得点につながった良いプレーを中心に褒め、失点したチームの守備で次に意識することにも触れてください。")
+        default:
+            lines.append("場面の種類（スコアからの機械的な分類）: \(segment.kind.japaneseName)")
+        }
         if !usedRealModel {
             lines.append("（注意: これはテスト用のランダムな検出結果です）")
         }
@@ -236,7 +252,7 @@ nonisolated enum IntelligenceAdvisor {
         lines.append("")
         lines.append(tacticsText(segment.tactics, teams: teams))
         lines.append("")
-        lines.append("この場面の見出し、状況説明、具体的なアドバイス、選択肢の候補それぞれへの評価とおすすめの番号を作成してください。")
+        lines.append("この場面の見出し、状況説明、具体的なアドバイス、選択肢の候補それぞれへの評価とおすすめの番号、良かったプレーを褒める一言を作成してください。")
         return lines.joined(separator: "\n")
     }
 
@@ -254,7 +270,8 @@ nonisolated enum IntelligenceAdvisor {
             lines.append("重要シーン:")
             for segment in segments.sorted(by: { $0.startTime < $1.startTime }) {
                 let headline = segment.commentary.map { "「\($0.headline)」" } ?? ""
-                lines.append("- \(DurationText.clock(segment.startTime)) \(segment.kind.japaneseName)\(headline)")
+                let team = record.team(id: segment.team)?.name.map { "（\($0)）" } ?? ""
+                lines.append("- \(DurationText.clock(segment.startTime)) \(segment.kind.japaneseName)\(team)\(headline)")
             }
         }
         lines.append("")
