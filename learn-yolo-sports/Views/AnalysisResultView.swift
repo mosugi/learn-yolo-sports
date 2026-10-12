@@ -39,6 +39,12 @@ struct AnalysisResultView: View {
     @State private var telestrationTask: Task<Void, Never>?
     /// 解説した場面（同じ再生で何度も止めないため）
     @State private var shownMoments: Set<SceneSegment.ID> = []
+    /// ダイジェスト再生中のシーン（nil はダイジェストではない）
+    @State private var digestSegmentID: SceneSegment.ID?
+    /// 試合の流れ（実況の出来事・ボール保持率）
+    @State private var playByPlay: MatchPlayByPlay?
+    /// 動画の上に実況の一言を出す
+    @AppStorage("showPlayByPlay") private var showPlayByPlay = true
     /// コートの白線・ボール周辺の空いた場所を表示するか
     @AppStorage("showFieldLines") private var showFieldLines = true
     @AppStorage("showOpenSpaces") private var showOpenSpaces = true
@@ -86,6 +92,8 @@ struct AnalysisResultView: View {
                         }
                         sceneNavigator
                             .padding(.horizontal)
+                        digestBar
+                            .padding(.horizontal)
                         if let telestration {
                             telestrationCard(telestration)
                                 .padding(.horizontal)
@@ -114,6 +122,13 @@ struct AnalysisResultView: View {
                     if showBirdsEye {
                         birdsEyeSection
                             .padding(.horizontal)
+                    }
+
+                    if let playByPlay {
+                        MatchCommentaryView(record: record, playByPlay: playByPlay, currentTime: currentTime) { time in
+                            jump(to: time)
+                        }
+                        .padding(.horizontal)
                     }
 
                     commentarySection
@@ -148,7 +163,19 @@ struct AnalysisResultView: View {
         .task(id: record.id) {
             viewModel.generateMissingAdvice(for: record.id)
         }
+        // 実況の出来事は保存せず、表示するときに解析結果から求める（選手の識別をやり直すと変わる）
+        .task(id: playByPlayKey) {
+            let record = record
+            playByPlay = await Task.detached(priority: .userInitiated) {
+                MatchPlayByPlay(record: record)
+            }.value
+        }
         .onDisappear { teardownPlayer() }
+    }
+
+    /// 実況の出来事を求め直す目安（選手の識別・シーンが変わったとき）
+    private var playByPlayKey: String {
+        "\(record.id)-\(record.trackingVersion ?? 0)-\(record.players?.count ?? 0)-\(record.segments?.count ?? 0)-\(record.teams?.count ?? 0)"
     }
 
     // MARK: - Player
@@ -207,6 +234,10 @@ struct AnalysisResultView: View {
                     return seconds.isFinite ? seconds : 0
                 }
             }
+            // 実況の一言（直前の出来事）
+            if showPlayByPlay, let event = playByPlay?.latestEvent(at: currentTime) {
+                playByPlayCaption(event)
+            }
             // 注目時点の前後では選択肢の矢印も重ねる
             if showAdvice, let segment = currentSegment, let tactics = segment.tactics,
                abs(currentTime - tactics.timestamp) <= 1.0 {
@@ -229,6 +260,7 @@ struct AnalysisResultView: View {
                 Toggle("コートの白線", isOn: $showFieldLines)
                 Toggle("空いたスペース（点線）", isOn: $showOpenSpaces)
                 Toggle("アドバイス（選択肢の矢印）", isOn: $showAdvice)
+                Toggle("実況の一言", isOn: $showPlayByPlay)
             }
             Section {
                 Toggle("注目場面で止めて書き込み解説", isOn: $pauseAtAdvice)
@@ -242,6 +274,29 @@ struct AnalysisResultView: View {
                 .clipShape(Circle())
         }
         .padding(8)
+    }
+
+    /// 動画の上に出す実況の一言
+    private func playByPlayCaption(_ event: PlayEvent) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "mic.fill")
+                .foregroundStyle(record.team(id: event.team)?.color.color ?? .white)
+            Text(event.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .font(.caption.bold())
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.black.opacity(0.6), in: Capsule())
+        .id(event.id)
+        .transition(.opacity)
+        .animation(.easeInOut(duration: 0.25), value: event.id)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(.top, 8)
+        .padding(.horizontal, 56)
+        .allowsHitTesting(false)
     }
 
     /// マーカーを付けている選手と、解除ボタン
@@ -296,6 +351,7 @@ struct AnalysisResultView: View {
             let previous = currentTime
             currentTime = CMTimeGetSeconds(time)
             pauseAtAdviceMomentIfNeeded(from: previous, to: currentTime)
+            advanceDigestIfNeeded()
         }
     }
 
@@ -309,7 +365,8 @@ struct AnalysisResultView: View {
     /// 再生中に注目時点を通り過ぎたら、止めて書き込みながら解説する
     private func pauseAtAdviceMomentIfNeeded(from previous: Double, to now: Double) {
         // シークで大きく飛んだときや、解説中（実際の選択の再生中）は止めない
-        guard showAdvice, pauseAtAdvice, telestration == nil, player.rate > 0,
+        // ダイジェストでは設定にかかわらず、各シーンで止めて解説する
+        guard (showAdvice && pauseAtAdvice) || digestSegmentID != nil, telestration == nil, player.rate > 0,
               now > previous, now - previous < 2 else { return }
         guard let segment = record.segments?.first(where: { segment in
             guard let tactics = segment.tactics, !tactics.options.isEmpty else { return false }
@@ -654,6 +711,9 @@ struct AnalysisResultView: View {
 
     private func jumpToScene(_ segment: SceneSegment) {
         finishTelestration(resume: false)
+        if digestSegmentID != nil {
+            digestSegmentID = segment.id
+        }
         // 移動したシーンでは、注目時点でもう一度止めて解説する
         shownMoments.remove(segment.id)
         if videoURL != nil {
@@ -663,6 +723,83 @@ struct AnalysisResultView: View {
         } else {
             jump(to: segment.keyTime)
         }
+    }
+
+    // MARK: - Digest
+
+    /// ダイジェストの開始ボタンと、再生中の進み具合
+    @ViewBuilder
+    private var digestBar: some View {
+        let segments = sortedSegments
+        if videoURL != nil, !segments.isEmpty {
+            if let digestSegmentID, let index = segments.firstIndex(where: { $0.id == digestSegmentID }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "play.square.stack.fill")
+                        .foregroundStyle(.yellow)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("ダイジェスト \(index + 1) / \(segments.count)")
+                            .font(.caption.bold())
+                            .monospacedDigit()
+                        Text(segments[index].commentary?.headline ?? segments[index].title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        endDigest()
+                    } label: {
+                        Label("ダイジェストを終える", systemImage: "stop.fill")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(10)
+                .background(Color.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+            } else {
+                Button {
+                    startDigest()
+                } label: {
+                    Label("ダイジェストを再生（重要シーン \(segments.count) 件）", systemImage: "play.square.stack")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    /// 重要シーンだけを順に再生し、各シーンで止めて書き込み解説する
+    private func startDigest() {
+        guard let first = sortedSegments.first else { return }
+        finishTelestration(resume: false)
+        focusPath = nil
+        // 一度解説したシーンでも、ダイジェストではもう一度止める
+        shownMoments = []
+        digestSegmentID = first.id
+        seek(to: first.startTime)
+        sceneJumpTarget = first.startTime
+        player.play()
+    }
+
+    private func endDigest() {
+        digestSegmentID = nil
+        finishTelestration(resume: false)
+        player.pause()
+    }
+
+    /// ダイジェスト中に今のシーンを見終えたら、次のシーンの始めへ移る
+    private func advanceDigestIfNeeded() {
+        guard let digestSegmentID, telestration == nil, player.rate > 0,
+              let segment = record.segments?.first(where: { $0.id == digestSegmentID }),
+              currentTime >= segment.endTime else { return }
+        guard let next = sortedSegments.first(where: { $0.startTime > segment.startTime }) else {
+            endDigest()
+            return
+        }
+        self.digestSegmentID = next.id
+        seek(to: next.startTime)
+        sceneJumpTarget = next.startTime
+        player.play()
     }
 
     // MARK: - Bird's-eye view

@@ -53,6 +53,19 @@ nonisolated struct GeneratedPlayerAdvice {
     var improvements: [String]
 }
 
+/// オンデバイス LLM に生成させる試合の解説の構造
+@Generable
+nonisolated struct GeneratedMatchReport {
+    @Guide(description: "試合の見出し。15文字程度の日本語")
+    var headline: String
+
+    @Guide(description: "試合の流れを伝える解説。実況・解説者が振り返るように、4〜6文の日本語")
+    var story: String
+
+    @Guide(description: "試合の見どころ。時刻（例: 3:15）で始まる短い日本語の文", .count(3))
+    var highlights: [String]
+}
+
 /// Apple Intelligence（Foundation Models）を使って解析結果へのアドバイスを生成する
 ///
 /// UI の状態は持たず、ViewModel のパイプラインから呼ばれる async なサービス。
@@ -69,6 +82,16 @@ nonisolated enum IntelligenceAdvisor {
         動画はサイドライン側から撮影したもので、両チームのゴールは画面の左右にあり、攻撃は画面の左右方向です。
         両チームの人数は常に同じです。画面に写る人数の差はカメラの向きによるもので、チームの人数の差や人数を増やす提案として述べないでください。
         検出には見逃しや誤検出も含まれます。数値から言えることだけを述べ、断定しすぎないでください。
+        """
+
+    /// 試合の解説用（改善の提案はせず、何が起きたかを伝える）
+    private static let commentatorInstructions = """
+        あなたはサッカー中継の解説者です。
+        試合動画を物体検出・追跡して得た出来事の記録をもとに、試合の流れを視聴者に伝える解説を日本語で返してください。
+        改善の提案やアドバイスはせず、どちらのチームがどう攻め、どこで流れが変わったかを、落ち着いた口調で伝えてください。
+        ユニフォームの色でチームを自動判定し、選手は背番号（#10 など）または記号（A, B など）で呼んでいます。
+        動画はサイドライン側から撮影したもので、両チームのゴールは画面の左右にあります。両チームの人数は常に同じです。
+        ボールの持ち主はボールに最も近い選手から推定しており、見逃しや誤りも含まれます。記録にないことは述べず、得点が記録にない場合は得点に触れないでください。
         """
 
     /// 端末で Apple Intelligence を利用できない場合の理由（利用できる場合は nil）
@@ -122,6 +145,19 @@ nonisolated enum IntelligenceAdvisor {
             suggestion: generated.suggestion,
             optionComments: comments,
             recommendedOptionID: recommended
+        )
+    }
+
+    /// 試合の流れを伝える解説を生成する
+    static func matchReport(for record: SavedAnalysis, playByPlay: MatchPlayByPlay) async throws -> MatchReport {
+        let session = LanguageModelSession(instructions: commentatorInstructions)
+        let response = try await session.respond(to: matchPrompt(for: record, playByPlay: playByPlay), generating: GeneratedMatchReport.self)
+        let generated = response.content
+        return MatchReport(
+            headline: generated.headline,
+            story: generated.story,
+            highlights: generated.highlights,
+            generatedAt: Date()
         )
     }
 
@@ -201,6 +237,28 @@ nonisolated enum IntelligenceAdvisor {
         lines.append(tacticsText(segment.tactics, teams: teams))
         lines.append("")
         lines.append("この場面の見出し、状況説明、具体的なアドバイス、選択肢の候補それぞれへの評価とおすすめの番号を作成してください。")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func matchPrompt(for record: SavedAnalysis, playByPlay: MatchPlayByPlay) -> String {
+        var lines: [String] = []
+        let duration = record.videoDuration ?? record.coveredDuration
+        lines.append("以下は\(DurationText.approximate(duration))のサッカー動画から記録した、試合の出来事です。")
+        if !record.usedRealModel {
+            lines.append("（注意: これはテスト用のランダムな検出結果です）")
+        }
+        lines.append("")
+        lines.append(playByPlay.summaryText(record: record))
+        if let segments = record.segments, !segments.isEmpty {
+            lines.append("")
+            lines.append("重要シーン:")
+            for segment in segments.sorted(by: { $0.startTime < $1.startTime }) {
+                let headline = segment.commentary?.headline.map { "「\($0)」" } ?? ""
+                lines.append("- \(DurationText.clock(segment.startTime)) \(segment.kind.japaneseName)\(headline)")
+            }
+        }
+        lines.append("")
+        lines.append("この記録から、試合の見出し、試合の流れを伝える解説、見どころを作成してください。")
         return lines.joined(separator: "\n")
     }
 

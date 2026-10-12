@@ -196,6 +196,7 @@ final class VideoAnalysisViewModel {
                 var updated = record
                 updated.advice = nil
                 updated.playerAdvice = nil
+                updated.matchReport = nil
                 updated.segments = updated.segments?.map { segment in
                     var segment = segment
                     segment.commentary = nil
@@ -257,6 +258,7 @@ final class VideoAnalysisViewModel {
             // 選手もシーンも変わるため、AI の総評・解説・選手のアドバイスは作り直す
             updated.advice = nil
             updated.playerAdvice = nil
+            updated.matchReport = nil
             updated.adviceVersion = IntelligenceAdvisor.promptVersion
             updated.adviceUnavailableReason = IntelligenceAdvisor.unavailableReason ?? IntelligenceAdvisor.deferredMessage
 
@@ -864,6 +866,7 @@ final class VideoAnalysisViewModel {
             updated.playersPerTeam = playersPerTeam
             updated.trackingVersion = PlayerTracker.version
             updated.playerAdvice = nil
+            updated.matchReport = nil
             updated.segments = updated.segments?.map { segment in
                 var segment = segment
                 segment.tactics = TacticalPlanner.snapshot(
