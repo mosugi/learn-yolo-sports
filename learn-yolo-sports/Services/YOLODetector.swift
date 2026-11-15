@@ -19,6 +19,10 @@ actor YOLODetector {
     private var model: VNCoreMLModel?
     private var didAttemptLoad = false
     private let confidenceThreshold: Float = 0.25
+    /// クラスをまたいで同じ物とみなす重なり（IoU）。同じ人が選手と審判の両方で検出されることがある
+    static let duplicateIoU = 0.7
+    /// ボール同士を同じボールとみなす重なり。小さい枠は数画素ずれるだけで重なりが下がるため低めにする
+    static let duplicateBallIoU = 0.3
 
     /// 実モデルで動作しているか（false の場合はモックモード）
     var isModelLoaded: Bool {
@@ -76,7 +80,7 @@ actor YOLODetector {
 
     /// Vision の結果を Detection に変換
     private func processResults(_ results: [VNRecognizedObjectObservation], imageSize: CGSize) -> [Detection] {
-        return results
+        let detections = results
             .filter { $0.confidence >= confidenceThreshold }
             .map { observation in
                 let label = observation.labels.first?.identifier ?? "unknown"
@@ -97,6 +101,32 @@ actor YOLODetector {
                     color: SportsClass(rawValue: label)?.color ?? .gray
                 )
             }
+        return Self.removeDuplicates(detections)
+    }
+
+    /// ほぼ同じ位置の重複した検出を、信頼度の高いものだけ残して取り除く
+    ///
+    /// モデル内の重複除去はクラスごとに働くため、同じ人が選手と審判で二重に出たり、
+    /// 小さなボールが少しずれて二重に出たりすることがある。
+    static func removeDuplicates(_ detections: [Detection]) -> [Detection] {
+        var kept: [Detection] = []
+        for detection in detections.sorted(by: { $0.confidence > $1.confidence }) {
+            let isDuplicate = kept.contains { other in
+                let overlap = iou(detection.boundingBox, other.boundingBox)
+                let bothBalls = detection.label == SportsClass.ball.rawValue && other.label == SportsClass.ball.rawValue
+                return overlap > (bothBalls ? duplicateBallIoU : duplicateIoU)
+            }
+            if !isDuplicate { kept.append(detection) }
+        }
+        return kept
+    }
+
+    private static func iou(_ a: CGRect, _ b: CGRect) -> Double {
+        let intersection = a.intersection(b)
+        guard !intersection.isNull else { return 0 }
+        let overlap = Double(intersection.width * intersection.height)
+        let union = Double(a.width * a.height + b.width * b.height) - overlap
+        return union > 0 ? overlap / union : 0
     }
 
     /// モック検出結果を生成（モデル未配置時用）

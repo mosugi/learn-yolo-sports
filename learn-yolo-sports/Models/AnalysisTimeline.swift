@@ -118,12 +118,12 @@ nonisolated enum TacticalOptionKind: String, Codable {
     }
 }
 
-/// シーンの注目時点で、ボール保持者が取れる選択肢（画面上の矢印として表示する）
+/// シーンの注目時点で、ボール保持者が取れる選択肢
 nonisolated struct TacticalOption: Codable, Hashable, Identifiable {
-    /// 矢印に表示する番号（1始まり）
+    /// 一覧に表示する番号（1始まり）
     let id: Int
     let kind: TacticalOptionKind
-    /// 矢印の始点・終点（正規化座標、左上原点）
+    /// 選択肢の始点・終点（正規化座標、左上原点）
     let from: CGPoint
     let to: CGPoint
     /// パスの受け手の呼び名（#10、A など。識別できた場合のみ）

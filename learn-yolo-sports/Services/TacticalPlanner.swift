@@ -34,7 +34,7 @@ nonisolated enum TacticalPlanner {
     /// - Parameters:
     ///   - frames: シーン内のフレーム
     ///   - aspectRatio: 画像の幅 / 高さ
-    ///   - players: 識別した選手（矢印の説明に呼び名を使う）
+    ///   - players: 識別した選手（選択肢の説明に呼び名を使う）
     static func snapshot(for segment: SceneSegment, frames: [SavedFrame], aspectRatio: Double, players: [PlayerIdentity]?) -> TacticalSnapshot? {
         let aspect = aspectRatio > 0 ? aspectRatio : 16.0 / 9.0
         let labels = Dictionary((players ?? []).map { ($0.id, $0.label) }, uniquingKeysWith: { a, _ in a })

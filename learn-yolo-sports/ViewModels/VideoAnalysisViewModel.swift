@@ -86,6 +86,8 @@ final class VideoAnalysisViewModel {
             guard let remaining = estimatedRemaining else { return base }
             return base + "・残り" + DurationText.approximate(remaining)
         case .commentating:
+            // シーンの解説より先に総評を作るため、その間はシーン数をまだ出さない
+            guard totalScenes > 0 else { return "試合全体の総評を作成中" }
             return "\(phase.label) \(currentScene)/\(totalScenes)"
         }
     }
@@ -339,7 +341,7 @@ final class VideoAnalysisViewModel {
                     subtitle: "シーン解説 \(index + 1)/\(resolvedSegments.count)"
                 )
 
-                // 選択肢の矢印は Apple Intelligence が使えなくても出せるよう、解説より先に計算する
+                // 選択肢は Apple Intelligence が使えなくても出せるよう、解説より先に計算する
                 let segmentFrames = frames.filter { resolvedSegments[index].contains($0.timestamp) }
                 if resolvedSegments[index].tactics == nil {
                     resolvedSegments[index].tactics = TacticalPlanner.snapshot(

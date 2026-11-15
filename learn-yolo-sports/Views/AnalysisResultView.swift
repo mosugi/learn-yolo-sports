@@ -26,7 +26,11 @@ struct AnalysisResultView: View {
     @State private var selectedFrameIndex = 0
     @State private var legacyImage: CGImage?
 
+    // 選手やシーンからシークしたとき、画面外にある動画までスクロールするための合図
+    @State private var playerScrollRequest = 0
+
     private static let adviceSectionID = "overallAdvice"
+    private static let playerSectionID = "player"
 
     private var videoURL: URL? { store.videoURL(for: record) }
 
@@ -52,12 +56,14 @@ struct AnalysisResultView: View {
 
                     if let videoURL {
                         playerSection(videoURL: videoURL)
+                            .id(Self.playerSectionID)
                         if let duration = record.videoDuration, duration > 0 {
                             timelineBar(duration: duration)
                                 .padding(.horizontal)
                         }
                     } else {
                         legacyFrameBrowser
+                            .id(Self.playerSectionID)
                     }
 
                     commentarySection
@@ -73,6 +79,11 @@ struct AnalysisResultView: View {
                 // スクリーンショット用: 総評までスクロールした状態にする
                 if LaunchOptions.showsAdvice {
                     proxy.scrollTo(Self.adviceSectionID, anchor: .top)
+                }
+            }
+            .onChange(of: playerScrollRequest) {
+                withAnimation {
+                    proxy.scrollTo(Self.playerSectionID, anchor: .top)
                 }
             }
         }
@@ -92,13 +103,14 @@ struct AnalysisResultView: View {
             ZStack {
                 VideoPlayer(player: player)
                 if showOverlay, let frame = nearestFrame(to: currentTime) {
-                    DetectionOverlayView(detections: frame.detections, teams: record.teams, players: record.players, displaySize: geo.size)
-                        .allowsHitTesting(false)
-                }
-                // 注目時点の前後では選択肢の矢印も重ねる
-                if showOverlay, let segment = currentSegment, let tactics = segment.tactics,
-                   abs(currentTime - tactics.timestamp) <= 1.0 {
-                    TacticalArrowsView(snapshot: tactics, recommendedOptionID: segment.recommendedOptionID, displaySize: geo.size)
+                    DetectionOverlayView(
+                        detections: frame.detections,
+                        teams: record.teams,
+                        players: record.players,
+                        displaySize: geo.size,
+                        // 右上の表示切り替えボタンにラベルが隠れないようにする
+                        reservedArea: CGRect(x: geo.size.width - 56, y: 0, width: 56, height: 56)
+                    )
                         .allowsHitTesting(false)
                 }
             }
@@ -309,6 +321,7 @@ struct AnalysisResultView: View {
         } else if let index = legacyFrames.indices.min(by: { abs(legacyFrames[$0].timestamp - time) < abs(legacyFrames[$1].timestamp - time) }) {
             selectedFrameIndex = index
         }
+        playerScrollRequest += 1
     }
 
     // MARK: - Chapters
@@ -327,6 +340,7 @@ struct AnalysisResultView: View {
                             if videoURL != nil {
                                 seek(to: segment.keyTime)
                                 player.play()
+                                playerScrollRequest += 1
                             } else {
                                 jump(to: segment.keyTime)
                             }

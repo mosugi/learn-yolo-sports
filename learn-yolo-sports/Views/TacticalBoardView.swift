@@ -7,85 +7,7 @@
 
 import SwiftUI
 
-/// 選択肢を番号付きの矢印で描くオーバーレイ（正規化座標の TacticalSnapshot を使う）
-struct TacticalArrowsView: View {
-    let snapshot: TacticalSnapshot
-    let recommendedOptionID: Int?
-    let displaySize: CGSize
-
-    private static let recommendedColor = Color.yellow
-    private static let otherColor = Color.white
-
-    var body: some View {
-        ZStack {
-            Canvas { context, size in
-                // 他の選択肢を先に描き、おすすめを最前面にする
-                let ordered = snapshot.options.sorted { lhs, _ in lhs.id != recommendedOptionID }
-                for option in ordered {
-                    let isRecommended = option.id == recommendedOptionID
-                    let color = isRecommended ? Self.recommendedColor : Self.otherColor.opacity(0.85)
-                    drawArrow(
-                        in: &context,
-                        from: point(option.from, in: size),
-                        to: point(option.to, in: size),
-                        color: color,
-                        lineWidth: isRecommended ? 4 : 2.5,
-                        dashed: option.kind == .dribble
-                    )
-                }
-
-                // ボール保持者の足元に輪を描く
-                let carrier = point(snapshot.carrier, in: size)
-                let ring = Path(ellipseIn: CGRect(x: carrier.x - 14, y: carrier.y - 6, width: 28, height: 12))
-                context.stroke(ring, with: .color(Self.recommendedColor), lineWidth: 2.5)
-            }
-
-            ForEach(snapshot.options) { option in
-                let isRecommended = option.id == recommendedOptionID
-                Text("\(option.id)")
-                    .font(.caption.bold())
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(isRecommended ? Self.recommendedColor : Self.otherColor))
-                    .foregroundStyle(.black)
-                    .position(point(option.to, in: displaySize))
-            }
-        }
-        .frame(width: displaySize.width, height: displaySize.height)
-    }
-
-    private func point(_ normalized: CGPoint, in size: CGSize) -> CGPoint {
-        CGPoint(x: normalized.x * size.width, y: normalized.y * size.height)
-    }
-
-    private func drawArrow(in context: inout GraphicsContext, from: CGPoint, to: CGPoint, color: Color, lineWidth: CGFloat, dashed: Bool) {
-        let dx = to.x - from.x, dy = to.y - from.y
-        let length = hypot(dx, dy)
-        guard length > 1 else { return }
-        let ux = dx / length, uy = dy / length
-
-        // 番号の円と重ならないよう、終点を少し手前で止める
-        let tip = CGPoint(x: to.x - ux * 13, y: to.y - uy * 13)
-        let headLength: CGFloat = 12
-        let headWidth: CGFloat = 7
-        let base = CGPoint(x: tip.x - ux * headLength, y: tip.y - uy * headLength)
-
-        var shaft = Path()
-        shaft.move(to: from)
-        shaft.addLine(to: base)
-        let style = StrokeStyle(lineWidth: lineWidth, lineCap: .round, dash: dashed ? [8, 6] : [])
-        context.stroke(shaft, with: .color(.black.opacity(0.4)), style: StrokeStyle(lineWidth: lineWidth + 2, lineCap: .round, dash: style.dash))
-        context.stroke(shaft, with: .color(color), style: style)
-
-        var head = Path()
-        head.move(to: tip)
-        head.addLine(to: CGPoint(x: base.x - uy * headWidth, y: base.y + ux * headWidth))
-        head.addLine(to: CGPoint(x: base.x + uy * headWidth, y: base.y - ux * headWidth))
-        head.closeSubpath()
-        context.fill(head, with: .color(color))
-    }
-}
-
-/// シーンの注目時点の静止画に、検出結果と選択肢の矢印を重ねて、選択肢の一覧と並べて表示する
+/// シーンの注目時点の静止画に検出結果を重ね、選択肢の一覧と並べて表示する
 struct TacticalBoardView: View {
     @Environment(AnalysisStore.self) private var store
     let record: SavedAnalysis
@@ -110,7 +32,7 @@ struct TacticalBoardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Image(systemName: "arrow.up.forward.circle")
+                Image(systemName: "list.number")
                 Text("この場面の選択肢")
                     .font(.subheadline.bold())
                 Spacer()
@@ -134,7 +56,6 @@ struct TacticalBoardView: View {
                     if let frame {
                         DetectionOverlayView(detections: frame.detections, teams: record.teams, players: record.players, displaySize: geo.size, compact: true)
                     }
-                    TacticalArrowsView(snapshot: snapshot, recommendedOptionID: segment.recommendedOptionID, displaySize: geo.size)
                 }
             }
             .aspectRatio(aspectRatio, contentMode: .fit)

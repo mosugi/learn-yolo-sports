@@ -60,6 +60,18 @@ nonisolated enum PlayerTracker {
     static let maxTrackGap = 1.5
     /// 途切れた追跡をつなぎ直す最大の間隔（秒）
     static let maxStitchGap = 5.0
+    /// 画面の端で消え、端から入ってきた追跡をつなぎ直す最大の間隔（秒）
+    ///
+    /// カメラが振られて画面外に出た選手は、カメラが戻るまで写らないため、通常のつなぎ直しより長く待つ。
+    static let maxReentryGap = 30.0
+    /// 画面外にいた間に動いたとみなす1秒あたりの距離（身長単位）。画面外の選手は走り続けるとは限らないため控えめにする
+    static let reentrySpeed = 1.0
+    /// 画面の端とみなす幅（画面の幅に対する割合）
+    static let screenEdgeMargin = 0.06
+    /// チームの選手とみなす、1観測あたりの色の票の差の下限
+    ///
+    /// 隣のコートの選手や観客など、どちらのチームの色ともはっきり合わない人を試合の選手から除く。
+    static let minimumTeamConfidence = 0.1
     /// 1秒あたりに動ける距離（身長単位。約 7 m/s）
     static let maxSpeed = 4.0
     /// 位置の誤差を見込んだ余裕（身長単位）
@@ -101,7 +113,8 @@ nonisolated enum PlayerTracker {
                     palette: detection.jerseyPalette ?? [],
                     isGoalkeeper: sportsClass == .goalkeeper,
                     isReferee: sportsClass == .referee,
-                    jerseyNumber: detection.jerseyNumber
+                    jerseyNumber: detection.jerseyNumber,
+                    isCutAtBottom: detection.boundingBox.maxY >= 0.98
                 ))
             }
             observations.append(list)
@@ -116,9 +129,10 @@ nonisolated enum PlayerTracker {
 
         // 3. 追跡し、途切れた追跡をつなぎ直して、追跡ごとにチームを決める
         var tracks = track(observations: observations, votes: votes, frames: frames, sections: sections)
-        tracks = stitch(tracks, sections: sections)
+        tracks = stitch(tracks, sections: sections, frames: frames, aspect: aspect)
         for index in tracks.indices {
-            tracks[index].team = (tracks[index].isGoalkeeper || tracks[index].isReferee) ? nil : tracks[index].colorTeam
+            let track = tracks[index]
+            tracks[index].team = (track.isGoalkeeper || track.isReferee || track.teamConfidence < minimumTeamConfidence) ? nil : track.colorTeam
         }
 
         // 4. 選手ごとに一意の呼び名を付ける
@@ -191,9 +205,15 @@ nonisolated enum PlayerTracker {
             makeIdentity(members, team: members[0].team, number: members[0].jerseyNumber, letter: nil, isGoalkeeper: false)
         }
 
-        // 背番号のない追跡は、ある程度の時間写っていたものだけ記号で呼ぶ
+        // 背番号のない追跡は、ある程度の時間写っていたものだけ記号で呼ぶ。
+        // 大半の時間で画面の下端に切れている人は、カメラの手前にいる控えや観客とみなして呼ばない
+        func isMostlyCutAtBottom(_ track: Track) -> Bool {
+            let cut = track.points.filter { observations[$0.frame][$0.observation].isCutAtBottom }.count
+            return cut * 2 > track.points.count
+        }
         var letterIndex = 0
-        for track in unnumbered.sorted(by: { $0.first.time < $1.first.time }) where duration(track) >= minimumLetteredDuration {
+        for track in unnumbered.sorted(by: { $0.first.time < $1.first.time })
+        where duration(track) >= minimumLetteredDuration && !isMostlyCutAtBottom(track) {
             makeIdentity([track], team: track.team, number: nil, letter: letterName(letterIndex), isGoalkeeper: false)
             letterIndex += 1
         }
@@ -277,6 +297,8 @@ nonisolated enum PlayerTracker {
         let isGoalkeeper: Bool
         let isReferee: Bool
         let jerseyNumber: Int?
+        /// 枠が画面の下端で切れている（カメラのすぐ手前にいて、足元が写っていない）
+        let isCutAtBottom: Bool
 
         /// 代表色（チームの代表色の計算に使う）。平均すると赤がピンク、白が灰色に寄るため、最も広い色を使う
         var color: LabColor? {
@@ -304,6 +326,12 @@ nonisolated enum PlayerTracker {
         let time: Double
         let position: CGPoint
         let height: Double
+        /// 画面上の足元の x（0〜1）
+        let screenX: Double
+
+        var isNearScreenEdge: Bool {
+            screenX <= PlayerTracker.screenEdgeMargin || screenX >= 1 - PlayerTracker.screenEdgeMargin
+        }
     }
 
     nonisolated struct Track {
@@ -328,6 +356,11 @@ nonisolated enum PlayerTracker {
             if teamVotes[0] > teamVotes[1] { return 0 }
             if teamVotes[1] > teamVotes[0] { return 1 }
             return nil
+        }
+
+        /// 1観測あたりの色の票の差（どちらかのチームの色とどれだけはっきり合うか）
+        var teamConfidence: Double {
+            abs(teamVotes[0] - teamVotes[1]) / Double(max(1, points.count))
         }
 
         /// 色の票の差がはっきりしているときのチーム（追跡の対応付けに使う）
@@ -450,7 +483,7 @@ nonisolated enum PlayerTracker {
                     tracks[pair.track].velocityY = isFirstStep ? vy : (tracks[pair.track].velocityY + vy) / 2
                 }
                 tracks[pair.track].add(
-                    TrackPoint(frame: frameIndex, observation: pair.observation, time: time, position: observation.position, height: observation.height),
+                    TrackPoint(frame: frameIndex, observation: pair.observation, time: time, position: observation.position, height: observation.height, screenX: observation.screenX),
                     observation: observation,
                     vote: votes[frameIndex][pair.observation]
                 )
@@ -459,7 +492,7 @@ nonisolated enum PlayerTracker {
             for (observationIndex, observation) in list.enumerated() where !usedObservations.contains(observationIndex) {
                 var track = Track(id: tracks.count, points: [])
                 track.add(
-                    TrackPoint(frame: frameIndex, observation: observationIndex, time: time, position: observation.position, height: observation.height),
+                    TrackPoint(frame: frameIndex, observation: observationIndex, time: time, position: observation.position, height: observation.height, screenX: observation.screenX),
                     observation: observation,
                     vote: votes[frameIndex][observationIndex]
                 )
@@ -471,7 +504,20 @@ nonisolated enum PlayerTracker {
     }
 
     /// 追跡が途切れた後に始まった追跡のうち、つながりうるものを1本にまとめる
-    static func stitch(_ tracks: [Track], sections: [Int]) -> [Track] {
+    static func stitch(_ tracks: [Track], sections: [Int], frames: [SavedFrame], aspect: Double) -> [Track] {
+        /// 間隔のあいだ、ずっと画面外（か端）にいたとみなせるか。その場所がはっきり写っていたのに
+        /// 見つからなかったのなら、別の人の追跡とみなす
+        func stayedOutOfView(from earlier: TrackPoint, to later: TrackPoint) -> Bool {
+            guard later.frame > earlier.frame + 1 else { return true }
+            for frameIndex in (earlier.frame + 1)..<later.frame {
+                let t = (frames[frameIndex].timestamp - earlier.time) / (later.time - earlier.time)
+                let worldX = Double(earlier.position.x) + (Double(later.position.x) - Double(earlier.position.x)) * t
+                let screenX = worldX / aspect - Double(frames[frameIndex].cameraOffset?.x ?? 0)
+                if screenX > 2 * screenEdgeMargin && screenX < 1 - 2 * screenEdgeMargin { return false }
+            }
+            return true
+        }
+
         var links: [(from: Int, to: Int, distance: Double)] = []
         // 開始時刻順に並べ、終了直後に始まる追跡だけを調べる
         let byStart = tracks.indices.sorted { tracks[$0].first.time < tracks[$1].first.time }
@@ -484,13 +530,21 @@ nonisolated enum PlayerTracker {
             }
             for k in lower..<startTimes.count {
                 let gap = startTimes[k] - earlier.last.time
-                guard gap <= maxStitchGap else { break }
+                guard gap <= maxReentryGap else { break }
                 let b = byStart[k]
                 let later = tracks[b]
                 guard gap > 0, a != b, sections[earlier.last.frame] == sections[later.first.frame] else { continue }
                 let height = (earlier.last.height + later.first.height) / 2
                 let d = distance(earlier.last.position, later.first.position, height: height)
-                guard d <= 1 + maxSpeed * gap else { continue }
+                if gap <= maxStitchGap {
+                    guard d <= 1 + maxSpeed * gap else { continue }
+                } else {
+                    // 長い間隔は、画面の端で消えて端から入ってきた、同じチームとはっきり分かる追跡だけをつなぐ
+                    guard earlier.last.isNearScreenEdge, later.first.isNearScreenEdge,
+                          let x = earlier.confidentColorTeam, x == later.confidentColorTeam,
+                          d <= positionTolerance + maxSpeed * maxStitchGap + reentrySpeed * (gap - maxStitchGap),
+                          stayedOutOfView(from: earlier.last, to: later.first) else { continue }
+                }
                 // チームと背番号が食い違うものはつながない
                 if let x = earlier.colorTeam, let y = later.colorTeam, x != y { continue }
                 if let x = earlier.jerseyNumber, let y = later.jerseyNumber, x != y { continue }
