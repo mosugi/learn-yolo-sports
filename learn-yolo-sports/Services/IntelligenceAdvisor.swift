@@ -69,6 +69,27 @@ nonisolated struct GeneratedMatchReport {
     var highlights: [String]
 }
 
+/// 生成した構造に含まれる、画面に出す文字列（崩れていないかを調べるために使う）
+nonisolated protocol GeneratedTexts {
+    var texts: [String] { get }
+}
+
+extension GeneratedAdvice: GeneratedTexts {
+    var texts: [String] { [summary] + observations + suggestions }
+}
+
+extension GeneratedSceneCommentary: GeneratedTexts {
+    var texts: [String] { [headline, commentary, suggestion, praise] + optionComments }
+}
+
+extension GeneratedPlayerAdvice: GeneratedTexts {
+    var texts: [String] { [summary] + strengths + improvements }
+}
+
+extension GeneratedMatchReport: GeneratedTexts {
+    var texts: [String] { [headline, story] + highlights }
+}
+
 /// Apple Intelligence（Foundation Models）を使って解析結果へのアドバイスを生成する
 ///
 /// UI の状態は持たず、ViewModel のパイプラインから呼ばれる async なサービス。
@@ -193,19 +214,42 @@ nonisolated enum IntelligenceAdvisor {
     /// 生成の出力の上限（やり直すときに使う）。総評・シーン解説とも数百字で収まる
     private static let retryMaximumResponseTokens = 800
 
-    /// 新しいセッションで生成する。入力は短くても、モデルが同じ文を繰り返して出力が上限を超えることがあるため、
-    /// そのときは出力の長さを制限し、ばらつきのない生成で1回だけやり直す
-    private static func respond<Content: Generable>(
+    /// やり直すときの温度。同じ文の繰り返しに陥りにくいよう、ばらつきを残しつつ控えめにする
+    private static let retryTemperature = 0.5
+
+    /// 新しいセッションで生成する。入力は短くても、モデルが同じ文を繰り返して出力が上限を超えたり、
+    /// 指示文を書き写したりすることがあるため、そのときは出力の長さを制限して1回だけやり直す
+    private static func respond<Content: Generable & GeneratedTexts>(
         to prompt: String,
         generating type: Content.Type,
         instructions: String = instructions
     ) async throws -> Content {
         do {
-            return try await LanguageModelSession(instructions: instructions).respond(to: prompt, generating: type).content
+            let content = try await LanguageModelSession(instructions: instructions).respond(to: prompt, generating: type).content
+            if isWellFormed(content) { return content }
         } catch where isContextSizeExceeded(error) {
-            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: retryMaximumResponseTokens)
-            return try await LanguageModelSession(instructions: instructions).respond(to: prompt, generating: type, options: options).content
+            // 下でやり直す
         }
+        let options = GenerationOptions(temperature: retryTemperature, maximumResponseTokens: retryMaximumResponseTokens)
+        let content = try await LanguageModelSession(instructions: instructions).respond(to: prompt, generating: type, options: options).content
+        guard isWellFormed(content) else { throw AdvisorError.malformedOutput }
+        return content
+    }
+
+    /// 生成した文に、指示文の書き写しや構造の記号が混じっていないか
+    private static let leakMarkers = ["}", "{", "追記", "あなたは", "戦術コーチです", "日本語で返して"]
+    /// 1つの項目の長さの上限。最も長い試合の解説（4〜6文）でも収まり、これを超えるのは繰り返しに陥ったとき
+    private static let maximumSentenceLength = 500
+
+    private static func isWellFormed(_ content: some GeneratedTexts) -> Bool {
+        content.texts.allSatisfy { text in
+            text.count <= maximumSentenceLength && !leakMarkers.contains { text.contains($0) }
+        }
+    }
+
+    enum AdvisorError: Error {
+        /// 生成した文が崩れていた（指示文の書き写しなど）
+        case malformedOutput
     }
 
     private static func isContextSizeExceeded(_ error: Error) -> Bool {
@@ -217,6 +261,9 @@ nonisolated enum IntelligenceAdvisor {
     /// エラーを表示用の日本語メッセージに変換する
     static func errorMessage(for error: Error) -> String {
         print("⚠️ アドバイスの生成に失敗しました: \(error)")
+        if case AdvisorError.malformedOutput = error {
+            return "AI の出力が崩れていたため表示できませんでした。もう一度お試しください。"
+        }
         // iOS 27 からは LanguageModelError で返る
         if #available(iOS 27.0, *), let modelError = error as? LanguageModelError {
             switch modelError {
