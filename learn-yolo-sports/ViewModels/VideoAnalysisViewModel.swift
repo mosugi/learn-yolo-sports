@@ -105,6 +105,8 @@ final class VideoAnalysisViewModel {
             guard let remaining = estimatedRemaining else { return base }
             return base + "・残り" + DurationText.approximate(remaining)
         case .commentating:
+            // シーンの解説より先に総評を作るため、その間はシーン数をまだ出さない
+            guard totalScenes > 0 else { return "試合全体の総評を作成中" }
             return "\(phase.label) \(currentScene)/\(totalScenes)"
         }
     }

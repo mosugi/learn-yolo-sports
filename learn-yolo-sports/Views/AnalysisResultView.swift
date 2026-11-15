@@ -60,7 +60,11 @@ struct AnalysisResultView: View {
     @State private var selectedFrameIndex = 0
     @State private var legacyImage: CGImage?
 
+    // 選手やシーンからシークしたとき、画面外にある動画までスクロールするための合図
+    @State private var playerScrollRequest = 0
+
     private static let adviceSectionID = "overallAdvice"
+    private static let playerSectionID = "player"
 
     private var videoURL: URL? { store.videoURL(for: record) }
 
@@ -93,6 +97,7 @@ struct AnalysisResultView: View {
 
                     if let videoURL {
                         playerSection(videoURL: videoURL)
+                            .id(Self.playerSectionID)
                         if let duration = record.videoDuration, duration > 0 {
                             timelineBar(duration: duration)
                                 .padding(.horizontal)
@@ -129,6 +134,7 @@ struct AnalysisResultView: View {
                         }
                     } else {
                         legacyFrameBrowser
+                            .id(Self.playerSectionID)
                     }
 
                     if showBirdsEye {
@@ -162,6 +168,11 @@ struct AnalysisResultView: View {
                 // スクリーンショット用: 総評までスクロールした状態にする
                 if LaunchOptions.showsAdvice {
                     proxy.scrollTo(Self.adviceSectionID, anchor: .top)
+                }
+            }
+            .onChange(of: playerScrollRequest) {
+                withAnimation {
+                    proxy.scrollTo(Self.playerSectionID, anchor: .top)
                 }
             }
         }
@@ -238,6 +249,8 @@ struct AnalysisResultView: View {
                     teams: record.teams,
                     players: record.players,
                     displaySize: size,
+                    // 右上の表示メニューのボタンにラベルが隠れないようにする
+                    reservedArea: CGRect(x: size.width - 56, y: 0, width: 56, height: 56),
                     focusedPlayerID: focusPath?.playerID,
                     onSelectPlayer: toggleFocus(playerID:)
                 )
@@ -1164,6 +1177,7 @@ struct AnalysisResultView: View {
         } else if let index = legacyFrames.indices.min(by: { abs(legacyFrames[$0].timestamp - time) < abs(legacyFrames[$1].timestamp - time) }) {
             selectedFrameIndex = index
         }
+        playerScrollRequest += 1
     }
 
     // MARK: - Chapters
@@ -1182,6 +1196,7 @@ struct AnalysisResultView: View {
                             if videoURL != nil {
                                 seek(to: segment.keyTime)
                                 player.play()
+                                playerScrollRequest += 1
                             } else {
                                 jump(to: segment.keyTime)
                             }

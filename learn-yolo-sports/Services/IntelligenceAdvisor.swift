@@ -117,9 +117,7 @@ nonisolated enum IntelligenceAdvisor {
 
     /// 試合全体の総評を生成する
     static func overallAdvice(for record: SavedAnalysis) async throws -> AnalysisAdvice {
-        let session = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: overallPrompt(for: record), generating: GeneratedAdvice.self)
-        let generated = response.content
+        let generated = try await respond(to: overallPrompt(for: record), generating: GeneratedAdvice.self)
         return AnalysisAdvice(
             summary: generated.summary,
             observations: generated.observations,
@@ -135,10 +133,8 @@ nonisolated enum IntelligenceAdvisor {
         teams: [TeamInfo]?,
         usedRealModel: Bool
     ) async throws -> SceneCommentary {
-        let session = LanguageModelSession(instructions: instructions)
         let prompt = scenePrompt(segment: segment, metrics: metrics, teams: teams, usedRealModel: usedRealModel)
-        let response = try await session.respond(to: prompt, generating: GeneratedSceneCommentary.self)
-        let generated = response.content
+        let generated = try await respond(to: prompt, generating: GeneratedSceneCommentary.self)
 
         let options = segment.tactics?.options ?? []
         // 数が合わない・存在しない番号のときは使わない（画面では幾何計算の説明・おすすめにフォールバックする）
@@ -156,9 +152,11 @@ nonisolated enum IntelligenceAdvisor {
 
     /// 試合の流れを伝える解説を生成する
     static func matchReport(for record: SavedAnalysis, playByPlay: MatchPlayByPlay) async throws -> MatchReport {
-        let session = LanguageModelSession(instructions: commentatorInstructions)
-        let response = try await session.respond(to: matchPrompt(for: record, playByPlay: playByPlay), generating: GeneratedMatchReport.self)
-        let generated = response.content
+        let generated = try await respond(
+            to: matchPrompt(for: record, playByPlay: playByPlay),
+            generating: GeneratedMatchReport.self,
+            instructions: commentatorInstructions
+        )
         return MatchReport(
             headline: generated.headline,
             story: generated.story,
@@ -169,9 +167,7 @@ nonisolated enum IntelligenceAdvisor {
 
     /// 指定した選手の動きへのアドバイスを生成する
     static func playerAdvice(metrics: PlayerMetrics, usedRealModel: Bool) async throws -> PlayerAdvice {
-        let session = LanguageModelSession(instructions: instructions)
-        let response = try await session.respond(to: playerPrompt(metrics: metrics, usedRealModel: usedRealModel), generating: GeneratedPlayerAdvice.self)
-        let generated = response.content
+        let generated = try await respond(to: playerPrompt(metrics: metrics, usedRealModel: usedRealModel), generating: GeneratedPlayerAdvice.self)
         return PlayerAdvice(
             playerID: metrics.player.id,
             summary: generated.summary,
@@ -190,26 +186,69 @@ nonisolated enum IntelligenceAdvisor {
            case .rateLimited = generationError {
             return true
         }
+        if #available(iOS 27.0, *), case .rateLimited = error as? LanguageModelError { return true }
+        return false
+    }
+
+    /// 生成の出力の上限（やり直すときに使う）。総評・シーン解説とも数百字で収まる
+    private static let retryMaximumResponseTokens = 800
+
+    /// 新しいセッションで生成する。入力は短くても、モデルが同じ文を繰り返して出力が上限を超えることがあるため、
+    /// そのときは出力の長さを制限し、ばらつきのない生成で1回だけやり直す
+    private static func respond<Content: Generable>(
+        to prompt: String,
+        generating type: Content.Type,
+        instructions: String = instructions
+    ) async throws -> Content {
+        do {
+            return try await LanguageModelSession(instructions: instructions).respond(to: prompt, generating: type).content
+        } catch where isContextSizeExceeded(error) {
+            let options = GenerationOptions(sampling: .greedy, maximumResponseTokens: retryMaximumResponseTokens)
+            return try await LanguageModelSession(instructions: instructions).respond(to: prompt, generating: type, options: options).content
+        }
+    }
+
+    private static func isContextSizeExceeded(_ error: Error) -> Bool {
+        if case .exceededContextWindowSize = error as? LanguageModelSession.GenerationError { return true }
+        if #available(iOS 27.0, *), case .contextSizeExceeded = error as? LanguageModelError { return true }
         return false
     }
 
     /// エラーを表示用の日本語メッセージに変換する
     static func errorMessage(for error: Error) -> String {
+        print("⚠️ アドバイスの生成に失敗しました: \(error)")
+        // iOS 27 からは LanguageModelError で返る
+        if #available(iOS 27.0, *), let modelError = error as? LanguageModelError {
+            switch modelError {
+            case .contextSizeExceeded:
+                return "生成した文章が長くなりすぎたため、作成できませんでした。"
+            case .guardrailViolation, .refusal:
+                return "安全上の理由により生成できませんでした。"
+            case .unsupportedLanguageOrLocale:
+                return "現在の言語設定ではアドバイスを生成できません。"
+            case .rateLimited:
+                return deferredMessage
+            case .timeout:
+                return "Apple Intelligence が混み合っているため生成できませんでした。しばらくしてから再度お試しください。"
+            default:
+                return "アドバイスを生成できませんでした。"
+            }
+        }
         if let generationError = error as? LanguageModelSession.GenerationError {
             switch generationError {
             case .rateLimited:
                 return deferredMessage
             case .exceededContextWindowSize:
-                return "入力が長すぎるため生成できませんでした。"
+                return "生成した文章が長くなりすぎたため、作成できませんでした。"
             case .guardrailViolation:
                 return "安全上の理由により生成できませんでした。"
             case .unsupportedLanguageOrLocale:
                 return "現在の言語設定ではアドバイスを生成できません。"
             default:
-                return "アドバイスの生成に失敗しました: \(generationError.localizedDescription)"
+                return "アドバイスを生成できませんでした。"
             }
         }
-        return "アドバイスの生成に失敗しました: \(error.localizedDescription)"
+        return "アドバイスを生成できませんでした。"
     }
 
     // MARK: - Prompt

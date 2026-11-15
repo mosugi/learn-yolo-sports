@@ -16,6 +16,8 @@ struct DetectionOverlayView: View {
     let displaySize: CGSize
     /// 小さな表示向け（細い枠・ラベルなし）
     var compact = false
+    /// ラベルを置かない領域（重ねて表示するボタンなど）
+    var reservedArea: CGRect? = nil
     /// 注目している選手。その選手の枠は PlayerFocusMarker が描くため除き、他の人は控えめに描く
     var focusedPlayerID: Int? = nil
     /// 指定すると、識別した選手の枠をタップしてその選手を選べるようにする（他の部分のタップは下の動画へ通す）
@@ -28,36 +30,34 @@ struct DetectionOverlayView: View {
 
     var body: some View {
         let isCompact = compact || focusedPlayerID != nil
+        let detections = visibleDetections
+        let visibleLabels = isCompact ? [:] : labelPlacement(for: detections)
         ZStack {
-            ForEach(Array(visibleDetections.enumerated()), id: \.offset) { _, detection in
-                let box = CGRect(
-                    x: detection.boundingBox.minX * displaySize.width,
-                    y: detection.boundingBox.minY * displaySize.height,
-                    width: detection.boundingBox.width * displaySize.width,
-                    height: detection.boundingBox.height * displaySize.height
-                )
+            ForEach(Array(detections.enumerated()), id: \.offset) { _, detection in
+                let box = rect(for: detection)
                 let color = overlayColor(for: detection)
+                Rectangle()
+                    .strokeBorder(color, lineWidth: isCompact || detection.isExcluded ? 1.5 : 3)
+                    .background(color.opacity(0.1))
+                    .frame(width: max(0, box.width), height: max(0, box.height))
+                    .modifier(PlayerTapModifier(playerID: detection.isExcluded ? nil : detection.playerID, onSelect: onSelectPlayer))
+                    .position(x: box.midX, y: box.midY)
+            }
 
-                ZStack(alignment: .topLeading) {
-                    Rectangle()
-                        .strokeBorder(color, lineWidth: isCompact || detection.isExcluded ? 1.5 : 3)
-                        .background(color.opacity(0.1))
-
-                    if !isCompact && !detection.isExcluded {
-                        Text(label(for: detection))
-                            .font(.caption2)
-                            .fontWeight(.bold)
-                            .padding(4)
-                            .background(color)
-                            .foregroundStyle(labelTextColor(for: detection))
-                            .cornerRadius(4)
-                            .fixedSize()
-                            .offset(y: -22)
-                    }
-                }
-                .frame(width: max(0, box.width), height: max(0, box.height))
-                .modifier(PlayerTapModifier(playerID: detection.isExcluded ? nil : detection.playerID, onSelect: onSelectPlayer))
-                .position(x: box.midX, y: box.midY)
+            // ラベルは枠とは別の層にして、他の選手の枠に隠れないよう最前面に描く
+            ForEach(visibleLabels.sorted(by: { $0.key < $1.key }), id: \.key) { index, placement in
+                let detection = detections[index]
+                Text(placement.text)
+                    .font(.caption2)
+                    .fontWeight(.bold)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(overlayColor(for: detection))
+                    .foregroundStyle(labelTextColor(for: detection))
+                    .cornerRadius(4)
+                    .fixedSize()
+                    .position(x: placement.frame.midX, y: placement.frame.midY)
+                    .allowsHitTesting(false)
             }
         }
         .opacity(focusedPlayerID == nil ? 1 : 0.5)
@@ -80,6 +80,73 @@ struct DetectionOverlayView: View {
         }
     }
 
+    private static let labelHeight: CGFloat = 16
+
+    private func rect(for detection: SavedDetection) -> CGRect {
+        CGRect(
+            x: detection.boundingBox.minX * displaySize.width,
+            y: detection.boundingBox.minY * displaySize.height,
+            width: detection.boundingBox.width * displaySize.width,
+            height: detection.boundingBox.height * displaySize.height
+        )
+    }
+
+    nonisolated struct LabelPlacement {
+        let text: String
+        let frame: CGRect
+    }
+
+    /// ラベルの置き場所。密集した場面で読めなくならないよう、ボールと手前（画面下側）の選手から順に、
+    /// 枠の上（だめなら下）で、他のラベル・他の選手の枠・予約領域と重ならず画面に収まる位置に置く。
+    /// どこにも置けないラベルは出さない
+    private func labelPlacement(for detections: [SavedDetection]) -> [Int: LabelPlacement] {
+        let order = detections.indices
+            .filter { !detections[$0].isExcluded }
+            .sorted { lhs, rhs in
+                let lBall = detections[lhs].label == SportsClass.ball.rawValue
+                let rBall = detections[rhs].label == SportsClass.ball.rawValue
+                if lBall != rBall { return lBall }
+                return detections[lhs].boundingBox.maxY > detections[rhs].boundingBox.maxY
+            }
+        let boxes = detections.map { rect(for: $0) }
+        let bounds = CGRect(origin: .zero, size: displaySize)
+        var placed: [CGRect] = reservedArea.map { [$0] } ?? []
+        var result: [Int: LabelPlacement] = [:]
+        for index in order {
+            guard let text = label(for: detections[index]) else { continue }
+            let box = boxes[index]
+            // 文字幅はおおよその見積もり（caption2 の太字で全角 12pt、半角 8pt 程度）
+            let width = text.reduce(CGFloat(10)) { $0 + ($1.isASCII ? 8 : 12) }
+            let candidates = [box.minY - Self.labelHeight - 2, box.maxY + 2].map { y in
+                // 画面からはみ出さないよう内側に寄せる
+                CGRect(
+                    x: min(max(0, box.midX - width / 2), max(0, bounds.width - width)),
+                    y: min(max(0, y), max(0, bounds.height - Self.labelHeight)),
+                    width: width,
+                    height: Self.labelHeight
+                )
+            }
+            func hitsLabel(_ frame: CGRect) -> Bool {
+                placed.contains { $0.insetBy(dx: -1, dy: -1).intersects(frame) }
+            }
+            func hitsOtherBox(_ frame: CGRect) -> Bool {
+                boxes.indices.contains { $0 != index && !detections[$0].isExcluded && boxes[$0].intersects(frame) }
+            }
+            // 小さなボールは隠れると見つけられないため、どのラベルも重ねない
+            func hitsBall(_ frame: CGRect) -> Bool {
+                boxes.indices.contains {
+                    $0 != index && detections[$0].label == SportsClass.ball.rawValue && boxes[$0].insetBy(dx: -2, dy: -2).intersects(frame)
+                }
+            }
+            // 他の枠にも重ならない位置を優先し、なければラベル同士が重ならない位置で妥協する
+            guard let frame = candidates.first(where: { !hitsLabel($0) && !hitsOtherBox($0) })
+                ?? candidates.first(where: { !hitsLabel($0) && !hitsBall($0) }) else { continue }
+            placed.append(frame)
+            result[index] = LabelPlacement(text: text, frame: frame)
+        }
+        return result
+    }
+
     private func overlayColor(for detection: SavedDetection) -> Color {
         // コート外（観客など）は灰色の細い枠にする
         if detection.isExcluded { return .gray }
@@ -95,13 +162,13 @@ struct DetectionOverlayView: View {
         return team?.color.isLight == true ? .black : .white
     }
 
-    private func label(for detection: SavedDetection) -> String {
-        let player = detection.playerID.flatMap { id in players?.first { $0.id == id } }
-        if let teamID = detection.team, let team = teams?.first(where: { $0.id == teamID }) {
-            return player.map { "\(team.name) \($0.label)" } ?? team.name
+    /// 枠に添える呼び名。チームは枠の色で分かるため、呼び名のない選手にはラベルを付けない
+    private func label(for detection: SavedDetection) -> String? {
+        if let player = detection.playerID.flatMap({ id in players?.first { $0.id == id } }) {
+            return player.label
         }
-        if let player { return player.label }
-        return SportsClass(rawValue: detection.label)?.japaneseName ?? detection.label
+        guard let sportsClass = SportsClass(rawValue: detection.label) else { return detection.label }
+        return sportsClass == .player ? nil : sportsClass.japaneseName
     }
 }
 
