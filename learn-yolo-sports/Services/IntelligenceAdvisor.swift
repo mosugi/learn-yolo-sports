@@ -194,7 +194,7 @@ nonisolated enum IntelligenceAdvisor {
            case .rateLimited = generationError {
             return true
         }
-        #if compiler(>=6.3)
+        #if canImport(FoundationModels, _version: 2)
         if #available(iOS 27.0, *), case .rateLimited = error as? LanguageModelError { return true }
         #endif
         return false
@@ -245,7 +245,7 @@ nonisolated enum IntelligenceAdvisor {
 
     private static func isContextSizeExceeded(_ error: Error) -> Bool {
         if case .exceededContextWindowSize = error as? LanguageModelSession.GenerationError { return true }
-        #if compiler(>=6.3)
+        #if canImport(FoundationModels, _version: 2)
         if #available(iOS 27.0, *), case .contextSizeExceeded = error as? LanguageModelError { return true }
         #endif
         return false
@@ -258,7 +258,7 @@ nonisolated enum IntelligenceAdvisor {
             return "AI の出力が崩れていたため表示できませんでした。もう一度お試しください。"
         }
         // iOS 27 からは LanguageModelError で返る（この型は Xcode 27 の SDK にしかない）
-        #if compiler(>=6.3)
+        #if canImport(FoundationModels, _version: 2)
         if #available(iOS 27.0, *), let modelError = error as? LanguageModelError {
             switch modelError {
             case .contextSizeExceeded:
