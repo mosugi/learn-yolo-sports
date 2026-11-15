@@ -74,6 +74,10 @@ nonisolated enum SceneKind: String, Codable {
     case congestion
     case fastBreak
     case goalThreat
+    /// 攻守の切り替え（ボールを奪った直後）
+    case transition
+    /// 得点（ユーザーが記録した場面）
+    case goal
 
     var japaneseName: String {
         switch self {
@@ -81,6 +85,8 @@ nonisolated enum SceneKind: String, Codable {
         case .congestion: return "競り合い"
         case .fastBreak: return "速い展開"
         case .goalThreat: return "ゴール前の攻防"
+        case .transition: return "攻守の切り替え"
+        case .goal: return "得点"
         }
     }
 
@@ -90,6 +96,8 @@ nonisolated enum SceneKind: String, Codable {
         case .congestion: return "person.3.fill"
         case .fastBreak: return "bolt.fill"
         case .goalThreat: return "target"
+        case .transition: return "arrow.triangle.2.circlepath"
+        case .goal: return "soccerball"
         }
     }
 }
@@ -103,6 +111,8 @@ nonisolated struct SceneCommentary: Codable, Hashable {
     var optionComments: [String]? = nil
     /// AI がおすすめする選択肢の番号（TacticalOption.id）
     var recommendedOptionID: Int? = nil
+    /// この場面で良かったプレー（褒める一言）
+    var praise: String? = nil
 }
 
 /// 選択肢の種類
@@ -118,12 +128,12 @@ nonisolated enum TacticalOptionKind: String, Codable {
     }
 }
 
-/// シーンの注目時点で、ボール保持者が取れる選択肢
+/// シーンの注目時点で、ボール保持者が取れる選択肢（画面上の矢印として表示する）
 nonisolated struct TacticalOption: Codable, Hashable, Identifiable {
-    /// 一覧に表示する番号（1始まり）
+    /// 矢印に表示する番号（1始まり）
     let id: Int
     let kind: TacticalOptionKind
-    /// 選択肢の始点・終点（正規化座標、左上原点）
+    /// 矢印の始点・終点（正規化座標、左上原点）
     let from: CGPoint
     let to: CGPoint
     /// パスの受け手の呼び名（#10、A など。識別できた場合のみ）
@@ -169,6 +179,10 @@ nonisolated struct SceneSegment: Codable, Hashable, Identifiable {
     var commentary: SceneCommentary?
     /// 注目時点の選択肢（ボール保持者が判定できなかった場合は nil）
     var tactics: TacticalSnapshot?
+    /// 場面の主役のチーム（攻守の切り替えはボールを奪ったチーム、得点は決めたチーム）
+    var team: Int? = nil
+    /// 得点のシーンを記録したときに区切ったり除いたりした元のシーン（取り消したときに戻す）
+    var displacedSegments: [SceneSegment]? = nil
 
     init(
         id: UUID = UUID(),
@@ -177,7 +191,8 @@ nonisolated struct SceneSegment: Codable, Hashable, Identifiable {
         keyTime: Double,
         kind: SceneKind,
         commentary: SceneCommentary? = nil,
-        tactics: TacticalSnapshot? = nil
+        tactics: TacticalSnapshot? = nil,
+        team: Int? = nil
     ) {
         self.id = id
         self.startTime = startTime
@@ -186,6 +201,7 @@ nonisolated struct SceneSegment: Codable, Hashable, Identifiable {
         self.kind = kind
         self.commentary = commentary
         self.tactics = tactics
+        self.team = team
     }
 
     var title: String { kind.japaneseName }

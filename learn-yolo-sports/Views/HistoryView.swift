@@ -136,10 +136,12 @@ private struct InterruptedRow: View {
 
 /// 保存済みの解析結果の詳細
 struct HistoryDetailView: View {
+    @Environment(AnalysisStore.self) private var store
     let record: SavedAnalysis
 
     var body: some View {
-        AnalysisResultView(record: record)
+        // AI 解説や選手のアドバイスの追記を反映するため、保存されている最新の記録を表示する
+        AnalysisResultView(record: store.record(for: record.id) ?? record)
             .navigationTitle(record.videoName)
             .navigationBarTitleDisplayMode(.inline)
     }

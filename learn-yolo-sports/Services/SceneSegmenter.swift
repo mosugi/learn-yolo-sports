@@ -17,6 +17,12 @@ nonisolated enum SceneSegmenter {
     private static let smoothingWindowSeconds = 5
     private static let minPeakSpacing: Double = 45
     private static let minSegmentSeconds: Double = 75
+    /// 攻守の切り替えとして取り上げる、奪ったあとにボールを持ち続けた時間の下限（秒）
+    private static let minTransitionKeep: Double = 2
+    /// 攻守の切り替えどうし・他のシーンとの間隔（秒）
+    private static let minTransitionSpacing: Double = 20
+    /// 攻守の切り替えから、注目時点（奪った選手が次の判断をする時点）までの時間（秒）
+    private static let transitionLead: Double = 1
 
     private struct FrameScore {
         let value: Double
@@ -26,10 +32,14 @@ nonisolated enum SceneSegmenter {
     private struct Peak {
         let time: Double
         let kind: SceneKind
+        var team: Int? = nil
     }
 
-    /// フレーム列から重要シーンを区切る（1〜12個、動画の長さに応じて増減する）
-    static func segments(frames: [SavedFrame], duration: Double) -> [SceneSegment] {
+    /// フレーム列から重要シーンを区切る
+    ///
+    /// 攻守が切り替わった場面（ボールを奪って持ち続けた場面）を優先して取り上げ、残りをボール周辺の
+    /// 密集度・端寄り・速さのスコアが高い場面で埋める（スコアの場面は 1〜12 個、動画の長さに応じて増減する）。
+    static func segments(frames: [SavedFrame], duration: Double, aspectRatio: Double = 16.0 / 9.0) -> [SceneSegment] {
         guard !frames.isEmpty, duration > 0 else { return [] }
 
         let sorted = frames.sorted { $0.timestamp < $1.timestamp }
@@ -42,7 +52,15 @@ nonisolated enum SceneSegmenter {
         let kinds = frameScores.map(\.kind)
 
         let maxSegments = max(3, min(12, Int((duration / minSegmentSeconds).rounded())))
-        var peaks = pickPeaks(times: times, scores: smoothedValues, kinds: kinds, maxCount: maxSegments)
+        let transitions = transitionPeaks(frames: sorted, duration: duration, aspectRatio: aspectRatio)
+        var peaks = transitions + pickPeaks(
+            times: times,
+            scores: smoothedValues,
+            kinds: kinds,
+            maxCount: maxSegments,
+            avoiding: transitions.map(\.time)
+        )
+        peaks.sort { $0.time < $1.time }
 
         if peaks.isEmpty {
             peaks = [Peak(time: duration / 2, kind: .buildUp)]
@@ -59,7 +77,8 @@ nonisolated enum SceneSegmenter {
                 startTime: boundaries[index],
                 endTime: boundaries[index + 1],
                 keyTime: peak.time,
-                kind: peak.kind
+                kind: peak.kind,
+                team: peak.team
             )
         }
     }
@@ -121,8 +140,24 @@ nonisolated enum SceneSegmenter {
         }
     }
 
-    /// スコアの高い順に、間隔を空けてピークを選ぶ
-    private static func pickPeaks(times: [Double], scores: [Double], kinds: [SceneKind], maxCount: Int) -> [Peak] {
+    /// 攻守の切り替え（奪ったあとにボールを持ち続けた場面）を、持ち続けた時間の長い順に間隔を空けて選ぶ
+    private static func transitionPeaks(frames: [SavedFrame], duration: Double, aspectRatio: Double) -> [Peak] {
+        let holdings = BallPossession.holdings(frames: frames, aspect: aspectRatio)
+        let candidates = BallPossession.turnovers(in: holdings)
+            .filter { $0.kept >= minTransitionKeep }
+            .sorted { $0.kept > $1.kept }
+        let maxCount = max(1, min(6, Int((duration / 120).rounded())))
+        var peaks: [Peak] = []
+        for candidate in candidates where peaks.count < maxCount {
+            let time = min(duration, candidate.time + transitionLead)
+            guard !peaks.contains(where: { abs($0.time - time) < minTransitionSpacing }) else { continue }
+            peaks.append(Peak(time: time, kind: .transition, team: candidate.team))
+        }
+        return peaks
+    }
+
+    /// スコアの高い順に、間隔を空けてピークを選ぶ（avoiding の時刻の近くは選ばない）
+    private static func pickPeaks(times: [Double], scores: [Double], kinds: [SceneKind], maxCount: Int, avoiding: [Double] = []) -> [Peak] {
         let candidates = scores.indices.sorted { scores[$0] > scores[$1] }
         var chosenTimes: [Double] = []
         var peaks: [Peak] = []
@@ -131,6 +166,7 @@ nonisolated enum SceneSegmenter {
             guard scores[index] > 0 else { continue }
             let time = times[index]
             if chosenTimes.contains(where: { abs($0 - time) < minPeakSpacing }) { continue }
+            if avoiding.contains(where: { abs($0 - time) < minTransitionSpacing }) { continue }
             chosenTimes.append(time)
             peaks.append(Peak(time: time, kind: kinds[index]))
             if peaks.count >= maxCount { break }

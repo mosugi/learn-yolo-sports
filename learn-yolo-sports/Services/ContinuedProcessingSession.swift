@@ -24,7 +24,9 @@ final class ContinuedProcessingSession {
     private var title = ""
     private var latestProgress: Double = 0
     private var finishedSuccess: Bool?
-    private let onExpire: () -> Void
+    /// システムまたはユーザーがバックグラウンド処理を打ち切ったときに呼ばれる
+    /// （動画の読み込みから解析へ引き継ぐときに差し替える）
+    var onExpire: () -> Void
 
     /// - Parameter onExpire: システムまたはユーザーがバックグラウンド処理を打ち切ったときに呼ばれる
     init(onExpire: @escaping () -> Void) {

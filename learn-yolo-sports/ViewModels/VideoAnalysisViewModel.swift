@@ -26,6 +26,17 @@ enum AnalysisPhase {
     }
 }
 
+/// 解析中に表示するフレーム（いまどこを処理しているかを見せる）
+struct AnalysisLivePreview {
+    let image: CGImage
+    let detections: [SavedDetection]
+    let timestamp: Double
+    var teams: [TeamInfo]? = nil
+    var players: [PlayerIdentity]? = nil
+    /// 処理中のシーン（シーン解説の段階のみ）
+    var segment: SceneSegment? = nil
+}
+
 /// 動画解析のビューモデル
 ///
 /// App で1つだけ生成して Environment で共有する。解析は View のライフサイクルから切り離した
@@ -39,6 +50,10 @@ final class VideoAnalysisViewModel {
     private static let framesPerSecond = 3
     /// 1度に並行して処理するフレーム数
     private static let batchSize = 4
+    /// 解析中に表示するフレームの長辺
+    private nonisolated static let previewDimension = 640
+    /// 解析中の表示を切り替える最短の間隔（秒）。速く切り替えるとちらついて見えるため
+    private static let previewInterval: TimeInterval = 0.8
 
     // MARK: - State
 
@@ -52,6 +67,10 @@ final class VideoAnalysisViewModel {
     var currentScene: Int = 0
     var totalScenes: Int = 0
     var errorMessage: String?
+
+    /// 解析中に表示するフレーム
+    var livePreview: AnalysisLivePreview?
+    private var livePreviewUpdatedAt = Date.distantPast
 
     /// 直近の解析結果の保存 ID（AnalysisStore から参照する）
     var currentRecordID: UUID?
@@ -108,8 +127,13 @@ final class VideoAnalysisViewModel {
     private let detector = YOLODetector()
 
     private var analysisTask: Task<Void, Never>?
+    /// 動画の読み込みから引き継いだバックグラウンド継続
+    private var handedOverSession: ContinuedProcessingSession?
     private var backgroundSession: ContinuedProcessingSession?
-    private var isRetryingCommentary = false
+    /// AI 解説を作成し直している解析結果
+    private(set) var retryingRecordID: UUID?
+    /// 作成中に、もう一度作成を確かめる必要が出た解析結果（作成中に得点のシーンを加えたときなど）
+    private var pendingAdviceRecordIDs: Set<UUID> = []
 
     init(store: AnalysisStore) {
         self.store = store
@@ -123,12 +147,146 @@ final class VideoAnalysisViewModel {
     }
 
     /// 新しく選んだ動画の解析を開始する（選んだ操作そのものがユーザー操作なので、そのままバックグラウンド継続を申請できる）
-    func startNewAnalysis(videoAt url: URL) {
-        guard !isAnalyzing else { return }
-        isAnalyzing = true
-        analysisTask = Task {
-            await self.beginAndRunPipeline(videoAt: url)
+    /// - Parameter session: 動画の読み込みから続けているバックグラウンド継続（なければ解析の開始時に申請する）
+    /// - Parameter fingerprint: 同じ動画を選び直したときに見分けるための目印
+    func startNewAnalysis(videoAt url: URL, fingerprint: VideoFingerprint? = nil, session: ContinuedProcessingSession? = nil) {
+        guard !isAnalyzing else {
+            session?.finish(success: false)
+            return
         }
+        isAnalyzing = true
+        handedOverSession = session
+        analysisTask = Task {
+            await self.beginAndRunPipeline(videoAt: url, fingerprint: fingerprint)
+        }
+    }
+
+    // MARK: - Reuse
+
+    /// 検出の条件の版。検出や属性付与（コート内の判定・背番号の読み取りなど）を変えたときは上げる
+    private static let detectionPipelineVersion = 1
+
+    /// 検出の条件（版・間隔・モデル）。同じなら保存済みの検出結果を使い回せる
+    private static func detectionVersion(usedRealModel: Bool) -> String {
+        "\(detectionPipelineVersion)-\(framesPerSecond)fps-\(usedRealModel ? YOLODetector.modelName : "mock")"
+    }
+
+    /// 前回の検出結果を使って解析し直しているか
+    private(set) var isReusingDetections = false
+
+    /// 同じ動画で、今と同じ条件の検出結果が保存されている解析結果
+    func reusableRecordID(for fingerprint: VideoFingerprint) async -> UUID? {
+        let version = Self.detectionVersion(usedRealModel: await detector.isModelLoaded)
+        return store.records.first { record in
+            guard record.detectionVersion == version,
+                  record.fingerprint?.matches(fingerprint) == true,
+                  let url = store.videoURL(for: record) else { return false }
+            return FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
+        }?.id
+    }
+
+    /// 保存済みの検出結果を使い、選手の識別・シーンの区切り・選択肢・AI 解説を作り直して上書きする
+    ///
+    /// 検出は 15 分の動画で数十分かかるが、それ以降は数秒で終わる。
+    /// 識別の方式も人数の設定も変わっていなければ、前回の結果をそのまま表示する。
+    func reanalyze(recordID: UUID, fingerprint: VideoFingerprint?) {
+        guard !isAnalyzing, let record = store.record(for: recordID) else { return }
+        let playersPerTeam = AnalysisSettings.playersPerTeam
+        errorMessage = nil
+
+        if record.trackingVersion == PlayerTracker.version, record.playersPerTeam == playersPerTeam {
+            // 識別は変わらないが、指示文が変わっていれば AI の文章だけを作り直す
+            if record.adviceVersion != IntelligenceAdvisor.promptVersion {
+                var updated = record
+                updated.advice = nil
+                updated.playerAdvice = nil
+                updated.matchReport = nil
+                updated.segments = updated.segments?.map { segment in
+                    var segment = segment
+                    segment.commentary = nil
+                    return segment
+                }
+                updated.adviceVersion = IntelligenceAdvisor.promptVersion
+                updated.adviceUnavailableReason = IntelligenceAdvisor.unavailableReason ?? IntelligenceAdvisor.deferredMessage
+                try? store.update(updated)
+            }
+            currentRecordID = recordID
+            hasUnseenResult = true
+            generateMissingAdvice(for: recordID)
+            return
+        }
+
+        isAnalyzing = true
+        isReusingDetections = true
+        phase = .segmenting
+        currentRecordID = nil
+        hasUnseenResult = false
+        analysisProgress = 0.85
+        activeVideoURL = store.videoURL(for: record)
+
+        analysisTask = Task {
+            defer {
+                self.isAnalyzing = false
+                self.isReusingDetections = false
+                self.phase = .idle
+            }
+            let aspectRatio = Self.aspectRatio(width: record.imageWidth, height: record.imageHeight)
+            let duration = record.videoDuration ?? record.coveredDuration
+            let directory = self.store.directoryURL(for: recordID)
+            let (frames, result, segments) = await Task.detached(priority: .userInitiated) {
+                var frames = record.frames
+                let appearances = Self.analyzeKeyFrames(frames: &frames, directory: directory)
+                let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
+                var segments = SceneSegmenter.segments(frames: frames, duration: duration, aspectRatio: aspectRatio)
+                for index in segments.indices {
+                    segments[index].tactics = TacticalPlanner.snapshot(
+                        for: segments[index],
+                        frames: frames.filter { segments[index].contains($0.timestamp) },
+                        aspectRatio: aspectRatio,
+                        players: result.players
+                    )
+                }
+                return (frames, result, segments)
+            }.value
+            guard !Task.isCancelled, var updated = self.store.record(for: recordID) else { return }
+
+            updated.frames = frames
+            updated.teams = result.teams
+            updated.players = result.players
+            updated.segments = segments
+            updated.playersPerTeam = playersPerTeam
+            updated.trackingVersion = PlayerTracker.version
+            if let assetIdentifier = fingerprint?.assetIdentifier {
+                updated.fingerprint?.assetIdentifier = assetIdentifier
+            }
+            // 選手もシーンも変わるため、AI の総評・解説・選手のアドバイスは作り直す
+            updated.advice = nil
+            updated.playerAdvice = nil
+            updated.matchReport = nil
+            updated.adviceVersion = IntelligenceAdvisor.promptVersion
+            updated.adviceUnavailableReason = IntelligenceAdvisor.unavailableReason ?? IntelligenceAdvisor.deferredMessage
+
+            do {
+                try self.store.update(updated)
+            } catch {
+                self.errorMessage = "エラー: \(error.localizedDescription)"
+                return
+            }
+            self.currentRecordID = recordID
+            self.hasUnseenResult = true
+            self.isAnalyzing = false
+            self.generateMissingAdvice(for: recordID)
+        }
+    }
+
+    /// 動画の読み込みを始めるときに、バックグラウンド継続を申請する
+    ///
+    /// 動画の選択というユーザー操作の直後に申請することで、読み込み中にアプリを離れても
+    /// ライブアクティビティに進捗が出て、読み込みから解析まで続けて動く。
+    func beginImportSession(onExpire: @escaping () -> Void) -> ContinuedProcessingSession {
+        let session = ContinuedProcessingSession(onExpire: onExpire)
+        session.begin(title: "動画を解析中", subtitle: "動画を読み込み中")
+        return session
     }
 
     /// 中断された解析を再開する（ボタンのタップがユーザー操作になる）
@@ -167,25 +325,49 @@ final class VideoAnalysisViewModel {
         errorMessage = nil
         currentRecordID = nil
         hasUnseenResult = false
+        livePreview = nil
     }
 
-    /// アプリがフォアグラウンドに戻ったときに呼ぶ。バックグラウンドで生成できなかったAI解説を再試行する
+    /// アプリがフォアグラウンドに戻ったときに呼ぶ。バックグラウンドで生成できなかったAI解説を作成する
     func appDidBecomeActive() {
-        guard !isAnalyzing, !isRetryingCommentary,
-              let id = currentRecordID,
-              let record = store.record(for: id),
-              record.adviceUnavailableReason != nil else { return }
+        guard let id = currentRecordID else { return }
+        generateMissingAdvice(for: id)
+    }
 
-        isRetryingCommentary = true
+    /// 生成できなかった総評・シーン解説を作成する（結果を表示したときと、アプリに戻ったときに呼ぶ）
+    ///
+    /// Foundation Models はバックグラウンドでは生成が制限されるため、アプリが前面にあるときだけ行う。
+    func generateMissingAdvice(for id: UUID) {
+        guard !isAnalyzing,
+              Self.isAppActive,
+              let record = store.record(for: id),
+              record.adviceUnavailableReason != nil,
+              IntelligenceAdvisor.unavailableReason == nil else { return }
+
+        guard retryingRecordID == nil else {
+            // 作成中なら、終わったあとにもう一度確かめる
+            pendingAdviceRecordIDs.insert(id)
+            return
+        }
+
+        retryingRecordID = id
         Task {
             await self.retryMissingAdvice(for: id)
-            self.isRetryingCommentary = false
+            self.retryingRecordID = nil
+            if let next = self.pendingAdviceRecordIDs.popFirst() {
+                self.generateMissingAdvice(for: next)
+            }
         }
+    }
+
+    /// アプリが前面にあるか（バックグラウンドでは AI 解説の生成が制限される）
+    private static var isAppActive: Bool {
+        UIApplication.shared.applicationState == .active
     }
 
     // MARK: - Pipeline
 
-    private func beginAndRunPipeline(videoAt url: URL) async {
+    private func beginAndRunPipeline(videoAt url: URL, fingerprint: VideoFingerprint?) async {
         let id = UUID()
         phase = .detecting
         hasUnseenResult = false
@@ -203,17 +385,27 @@ final class VideoAnalysisViewModel {
             )
             activeVideoURL = destination
 
-            guard let checkpoint = store.checkpoint(for: id) else {
+            guard var checkpoint = store.checkpoint(for: id) else {
                 errorMessage = "解析を開始できませんでした"
                 isAnalyzing = false
                 phase = .idle
+                handedOverSession?.finish(success: false)
+                handedOverSession = nil
                 return
             }
+            checkpoint.fingerprint = fingerprint
+            try store.updateCheckpoint(checkpoint)
             await runPipeline(checkpoint: checkpoint)
         } catch {
             errorMessage = "エラー: \(error.localizedDescription)"
             isAnalyzing = false
             phase = .idle
+            handedOverSession?.finish(success: false)
+            handedOverSession = nil
+            // 解析ディレクトリへ移す前に失敗した場合は、読み込んだ動画を残さない
+            if FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 
@@ -226,12 +418,20 @@ final class VideoAnalysisViewModel {
         let videoURL = store.videoURL(for: initialCheckpoint)
         activeVideoURL = videoURL
         processingCheckpointID = id
+        livePreview = nil
         let startTime = Date()
 
-        let session = ContinuedProcessingSession { [weak self] in
-            self?.cancelAnalysis()
+        let session: ContinuedProcessingSession
+        if let handedOverSession {
+            session = handedOverSession
+            session.onExpire = { [weak self] in self?.cancelAnalysis() }
+            self.handedOverSession = nil
+        } else {
+            session = ContinuedProcessingSession { [weak self] in
+                self?.cancelAnalysis()
+            }
+            session.begin(title: "動画を解析中", subtitle: initialCheckpoint.videoFileName)
         }
-        session.begin(title: "動画を解析中", subtitle: initialCheckpoint.videoFileName)
         backgroundSession = session
 
         var checkpoint = initialCheckpoint
@@ -271,6 +471,10 @@ final class VideoAnalysisViewModel {
             var segments = checkpoint.segments
             let aspectRatio = Self.aspectRatio(width: checkpoint.imageWidth ?? 0, height: checkpoint.imageHeight ?? 0)
 
+            if livePreview == nil {
+                await showStoredFrame(of: checkpoint, at: checkpoint.videoDuration, frames: frames)
+            }
+
             if segments == nil {
                 phase = .segmenting
                 session.update(fraction: 0.85, subtitle: phase.label)
@@ -278,17 +482,23 @@ final class VideoAnalysisViewModel {
                 checkpoint.updatedAt = Date()
                 try store.updateCheckpoint(checkpoint)
 
+                if checkpoint.playersPerTeam == nil {
+                    checkpoint.playersPerTeam = AnalysisSettings.playersPerTeam
+                }
+                let playersPerTeam = checkpoint.playersPerTeam ?? AnalysisSettings.playersPerTeam
                 let detectedFrames = frames
+                let directory = store.directoryURL(for: id)
                 let (tracked, result) = await Task.detached(priority: .userInitiated) {
                     var tracked = detectedFrames
-                    let result = PlayerTracker.analyze(frames: tracked, aspectRatio: aspectRatio)
+                    let appearances = Self.analyzeKeyFrames(frames: &tracked, directory: directory)
+                    let result = PlayerTracker.analyze(frames: tracked, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
                     result.apply(to: &tracked)
                     return (tracked, result)
                 }.value
                 frames = tracked
                 teams = result.teams
                 players = result.players
-                segments = SceneSegmenter.segments(frames: frames, duration: checkpoint.videoDuration)
+                segments = SceneSegmenter.segments(frames: frames, duration: checkpoint.videoDuration, aspectRatio: aspectRatio)
 
                 try await store.rewriteFrames(id: id, frames: frames)
 
@@ -320,14 +530,26 @@ final class VideoAnalysisViewModel {
                 players: players,
                 segments: segments
             )
+            record.playersPerTeam = checkpoint.playersPerTeam
+            record.fingerprint = checkpoint.fingerprint
+            record.detectionVersion = Self.detectionVersion(usedRealModel: checkpoint.usedRealModel)
+            record.trackingVersion = PlayerTracker.version
+            record.adviceVersion = IntelligenceAdvisor.promptVersion
 
             var adviceFailureReason: String? = IntelligenceAdvisor.unavailableReason
+            // バックグラウンドでは生成が制限されるため、一度制限されたら残りはアプリを開いたときに作る
+            var deferred = false
 
             if adviceFailureReason == nil {
-                do {
-                    record.advice = try await IntelligenceAdvisor.overallAdvice(for: record)
-                } catch {
-                    adviceFailureReason = IntelligenceAdvisor.errorMessage(for: error)
+                if Self.isAppActive {
+                    do {
+                        record.advice = try await IntelligenceAdvisor.overallAdvice(for: record)
+                    } catch {
+                        deferred = IntelligenceAdvisor.isRateLimited(error)
+                        adviceFailureReason = IntelligenceAdvisor.errorMessage(for: error)
+                    }
+                } else {
+                    adviceFailureReason = IntelligenceAdvisor.deferredMessage
                 }
             }
 
@@ -336,12 +558,20 @@ final class VideoAnalysisViewModel {
             for index in resolvedSegments.indices {
                 try Task.checkCancellation()
                 currentScene = index + 1
+                await showStoredFrame(
+                    of: checkpoint,
+                    at: resolvedSegments[index].keyTime,
+                    frames: frames,
+                    teams: teams,
+                    players: players,
+                    segment: resolvedSegments[index]
+                )
                 session.update(
                     fraction: 0.85 + 0.15 * Double(index + 1) / Double(max(1, resolvedSegments.count)),
                     subtitle: "シーン解説 \(index + 1)/\(resolvedSegments.count)"
                 )
 
-                // 選択肢は Apple Intelligence が使えなくても出せるよう、解説より先に計算する
+                // 選択肢の矢印は Apple Intelligence が使えなくても出せるよう、解説より先に計算する
                 let segmentFrames = frames.filter { resolvedSegments[index].contains($0.timestamp) }
                 if resolvedSegments[index].tactics == nil {
                     resolvedSegments[index].tactics = TacticalPlanner.snapshot(
@@ -355,6 +585,10 @@ final class VideoAnalysisViewModel {
                 guard resolvedSegments[index].commentary == nil else { continue }
                 guard IntelligenceAdvisor.unavailableReason == nil else {
                     adviceFailureReason = IntelligenceAdvisor.unavailableReason
+                    continue
+                }
+                guard !deferred, Self.isAppActive else {
+                    adviceFailureReason = IntelligenceAdvisor.deferredMessage
                     continue
                 }
 
@@ -374,6 +608,7 @@ final class VideoAnalysisViewModel {
                         usedRealModel: checkpoint.usedRealModel
                     )
                 } catch {
+                    deferred = IntelligenceAdvisor.isRateLimited(error)
                     adviceFailureReason = IntelligenceAdvisor.errorMessage(for: error)
                 }
 
@@ -401,10 +636,16 @@ final class VideoAnalysisViewModel {
 
         isAnalyzing = false
         phase = .idle
+        livePreview = nil
         detectionStart = nil
         analysisTask = nil
         backgroundSession = nil
         processingCheckpointID = nil
+
+        // バックグラウンドで作れなかった AI 解説は、アプリが前面にあれば続けて作る
+        if currentRecordID == id {
+            generateMissingAdvice(for: id)
+        }
     }
 
     /// 未処理のフレームを検出する（画像生成・検出・OCR は TaskGroup で同時に数枚処理する）
@@ -493,6 +734,15 @@ final class VideoAnalysisViewModel {
                 }
             }
 
+            if let last = batchResults.last, Date().timeIntervalSince(livePreviewUpdatedAt) >= Self.previewInterval {
+                livePreviewUpdatedAt = Date()
+                livePreview = AnalysisLivePreview(
+                    image: last.preview,
+                    detections: last.frame.detections,
+                    timestamp: last.frame.timestamp
+                )
+            }
+
             index = batchEnd
             currentFrame = index
             analysisProgress = Double(index) / Double(totalFrames) * 0.85
@@ -515,6 +765,8 @@ final class VideoAnalysisViewModel {
         let image: CGImage?
         /// カメラの動きを求めるための縮小画像
         let thumbnail: CGImage
+        /// 解析中の画面に表示する縮小画像
+        let preview: CGImage
         let imageSize: CGSize
     }
 
@@ -545,25 +797,228 @@ final class VideoAnalysisViewModel {
             frame: frame,
             image: isKeyFrame ? image : nil,
             thumbnail: FrameImageIO.downscaled(image, maxDimension: PlayerAttributeAnalyzer.thumbnailDimension) ?? image,
+            preview: FrameImageIO.downscaled(image, maxDimension: previewDimension) ?? image,
             imageSize: CGSize(width: image.width, height: image.height)
         )
+    }
+
+    /// 保存済みのキーフレーム（1秒ごと）のうち、指定時刻に最も近いものを解析中の画面に表示する
+    private func showStoredFrame(
+        of checkpoint: AnalysisCheckpoint,
+        at time: Double,
+        frames: [SavedFrame],
+        teams: [TeamInfo]? = nil,
+        players: [PlayerIdentity]? = nil,
+        segment: SceneSegment? = nil
+    ) async {
+        let keyFrames = frames.filter { $0.imageFileName != nil }
+        guard let frame = keyFrames.min(by: { abs($0.timestamp - time) < abs($1.timestamp - time) }),
+              let image = await store.loadFrameImage(for: checkpoint, frameNumber: frame.frameNumber) else { return }
+        livePreview = AnalysisLivePreview(
+            image: image,
+            detections: frame.detections,
+            timestamp: frame.timestamp,
+            teams: teams,
+            players: players,
+            segment: segment
+        )
+    }
+
+    /// 解析ディレクトリに保存した画像（1 秒ごと）を 1 枚ずつ読み、コートの白線をフレームに書き込み、
+    /// 選手の見た目の特徴（選手の識別に使う）を返す
+    private nonisolated static func analyzeKeyFrames(frames: inout [SavedFrame], directory: URL) -> AppearanceExtractor.Features {
+        var appearances: AppearanceExtractor.Features = [:]
+        let keyFrames = frames.indices.filter { frames[$0].imageFileName != nil }
+        for (order, index) in keyFrames.enumerated() {
+            guard let name = frames[index].imageFileName,
+                  let image = FrameImageIO.readImage(at: directory.appending(path: name)) else { continue }
+            let detections = frames[index].detections
+            let feet = detections
+                .filter { !$0.isExcluded && $0.label != SportsClass.ball.rawValue }
+                .map(\.footPoint)
+            frames[index].fieldLines = FieldLineDetector.boundary(in: image, excluding: detections.map(\.boundingBox), feet: feet)
+            if order % AppearanceExtractor.keyFrameStride == 0 {
+                let found = AppearanceExtractor.features(in: image, detections: detections)
+                if !found.isEmpty { appearances[index] = found }
+            }
+        }
+        return appearances
     }
 
     private nonisolated static func aspectRatio(width: Int, height: Int) -> Double {
         width > 0 && height > 0 ? Double(width) / Double(height) : 16.0 / 9.0
     }
 
+    // MARK: - Re-identification
+
+    /// 選手の識別をやり直している解析結果
+    private(set) var reidentifyingRecordID: UUID?
+
+    /// 保存済みの解析結果で、1チームの人数を指定して選手の識別だけをやり直す（検出はやり直さない）
+    ///
+    /// 選手が変わるため、選択肢の矢印は計算し直し、選手のアドバイスと選択肢への AI の評価は消す。
+    func reidentifyPlayers(recordID: UUID, playersPerTeam: Int) {
+        guard reidentifyingRecordID == nil, let record = store.record(for: recordID) else { return }
+        reidentifyingRecordID = recordID
+
+        Task {
+            defer { self.reidentifyingRecordID = nil }
+            let aspectRatio = Self.aspectRatio(width: record.imageWidth, height: record.imageHeight)
+            let directory = self.store.directoryURL(for: recordID)
+            let (frames, result) = await Task.detached(priority: .userInitiated) {
+                var frames = record.frames
+                let appearances = Self.analyzeKeyFrames(frames: &frames, directory: directory)
+                let result = PlayerTracker.retrack(frames: &frames, aspectRatio: aspectRatio, playersPerTeam: playersPerTeam, appearances: appearances)
+                return (frames, result)
+            }.value
+
+            guard var updated = self.store.record(for: recordID) else { return }
+            updated.frames = frames
+            updated.teams = result.teams
+            updated.players = result.players
+            updated.playersPerTeam = playersPerTeam
+            updated.trackingVersion = PlayerTracker.version
+            updated.playerAdvice = nil
+            updated.matchReport = nil
+            updated.segments = updated.segments?.map { segment in
+                var segment = segment
+                segment.tactics = TacticalPlanner.snapshot(
+                    for: segment,
+                    frames: frames.filter { segment.contains($0.timestamp) },
+                    aspectRatio: aspectRatio,
+                    players: result.players
+                )
+                segment.commentary?.optionComments = nil
+                segment.commentary?.recommendedOptionID = nil
+                return segment
+            }
+            do {
+                try self.store.update(updated)
+            } catch {
+                self.errorMessage = "エラー: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: - Goal scenes
+
+    /// 得点した時刻を記録し、得点までの場面をシーンとして加える（AI 解説・書き込み解説の対象になる）
+    ///
+    /// 得点は映像からは確実に判定できないため、再生しながら利用者が記録する。
+    /// 得点の 12 秒前から 4 秒後までをシーンとし、重なる他のシーンは手前で区切る。
+    func addGoalScene(recordID: UUID, time: Double, team: Int?) {
+        guard var record = store.record(for: recordID) else { return }
+        let duration = record.videoDuration ?? record.coveredDuration
+        let start = max(0, time - 12)
+        let end = min(max(duration, time), time + 4)
+        guard end > start else { return }
+        // シュートを打つ前の判断の時点を注目時点にする
+        var goal = SceneSegment(startTime: start, endTime: end, keyTime: max(start, time - 3), kind: .goal, team: team)
+        goal.tactics = TacticalPlanner.snapshot(
+            for: goal,
+            frames: record.frames.filter { $0.timestamp >= start && $0.timestamp <= time },
+            aspectRatio: Self.aspectRatio(width: record.imageWidth, height: record.imageHeight),
+            players: record.players
+        )
+
+        var segments: [SceneSegment] = []
+        var displaced: [SceneSegment] = []
+        for segment in record.segments ?? [] {
+            // 得点のシーンと重なる部分を除く（短くなりすぎたシーンはなくす）
+            var pieces: [(Double, Double)] = []
+            if segment.startTime < start { pieces.append((segment.startTime, min(segment.endTime, start))) }
+            if segment.endTime > end { pieces.append((max(segment.startTime, end), segment.endTime)) }
+            if pieces.count == 1, pieces[0] == (segment.startTime, segment.endTime) {
+                segments.append(segment)
+                continue
+            }
+            // 取り消したときに戻せるよう、元のシーンを残しておく
+            displaced.append(segment)
+            // 注目時点を含む側を残す
+            let kept = pieces.first { $0.0 <= segment.keyTime && segment.keyTime < $0.1 } ?? pieces.max { ($0.1 - $0.0) < ($1.1 - $1.0) }
+            guard let kept, kept.1 - kept.0 >= 2 else { continue }
+            var trimmed = SceneSegment(
+                id: segment.id,
+                startTime: kept.0,
+                endTime: kept.1,
+                keyTime: min(max(segment.keyTime, kept.0), kept.1),
+                kind: segment.kind,
+                commentary: segment.commentary,
+                tactics: segment.tactics,
+                team: segment.team
+            )
+            if let tactics = trimmed.tactics, !trimmed.contains(tactics.timestamp) {
+                trimmed.tactics = nil
+            }
+            segments.append(trimmed)
+        }
+        goal.displacedSegments = displaced
+        segments.append(goal)
+        record.segments = segments.sorted { $0.startTime < $1.startTime }
+        record.matchReport = nil
+        record.adviceUnavailableReason = IntelligenceAdvisor.unavailableReason ?? IntelligenceAdvisor.deferredMessage
+        do {
+            try store.update(record)
+            generateMissingAdvice(for: recordID)
+        } catch {
+            errorMessage = "エラー: \(error.localizedDescription)"
+        }
+    }
+
+    /// 記録した得点のシーンを取り消す（区切ったり除いたりした元のシーンは戻す）
+    func removeScene(recordID: UUID, segmentID: SceneSegment.ID) {
+        guard var record = store.record(for: recordID),
+              let removed = record.segments?.first(where: { $0.id == segmentID }) else { return }
+        var segments = (record.segments ?? []).filter { $0.id != segmentID }
+        for original in removed.displacedSegments ?? [] {
+            segments.removeAll { $0.id == original.id }
+            segments.append(original)
+        }
+        record.segments = segments.sorted { $0.startTime < $1.startTime }
+        record.matchReport = nil
+        do {
+            try store.update(record)
+        } catch {
+            errorMessage = "エラー: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: - Advice retry
 
     private func retryMissingAdvice(for id: UUID) async {
         guard var record = store.record(for: id) else { return }
-        var failureReason: String? = IntelligenceAdvisor.unavailableReason
+        var failureReason: String?
 
-        if failureReason == nil, record.advice == nil {
+        /// 1件作るたびに保存して、画面に順に反映する
+        func save() {
+            if let latest = store.record(for: id) {
+                // 生成中に保存された選手のアドバイスを消さない
+                record.playerAdvice = latest.playerAdvice
+                // 生成中に記録・取り消した得点のシーンも消さない（作った解説は同じシーンに移す）
+                let generated = Dictionary((record.segments ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                record.segments = latest.segments?.map { segment in
+                    var segment = segment
+                    if segment.commentary == nil { segment.commentary = generated[segment.id]?.commentary }
+                    if segment.tactics == nil { segment.tactics = generated[segment.id]?.tactics }
+                    return segment
+                }
+                record.matchReport = latest.matchReport
+            }
+            try? store.update(record)
+        }
+
+        /// 生成できないときは理由を残して打ち切る
+        func generate(_ body: () async throws -> Void) async -> Bool {
+            guard Self.isAppActive else {
+                failureReason = IntelligenceAdvisor.deferredMessage
+                return false
+            }
             do {
-                record.advice = try await IntelligenceAdvisor.overallAdvice(for: record)
+                try await body()
+                return true
             } catch {
                 failureReason = IntelligenceAdvisor.errorMessage(for: error)
+                return !IntelligenceAdvisor.isRateLimited(error)
             }
         }
 
@@ -576,36 +1031,46 @@ final class VideoAnalysisViewModel {
                     players: record.players
                 )
             }
-
-            for index in segments.indices where segments[index].commentary == nil {
-                guard IntelligenceAdvisor.unavailableReason == nil else {
-                    failureReason = IntelligenceAdvisor.unavailableReason
-                    break
-                }
-
-                let segment = segments[index]
-                let segmentFrames = record.frames.filter { segment.contains($0.timestamp) }
-                let metrics = AnalysisMetrics(
-                    frames: segmentFrames,
-                    duration: segment.endTime - segment.startTime,
-                    teams: record.teams,
-                    players: record.players
-                )
-                do {
-                    segments[index].commentary = try await IntelligenceAdvisor.sceneCommentary(
-                        for: segment,
-                        metrics: metrics,
-                        teams: record.teams,
-                        usedRealModel: record.usedRealModel
-                    )
-                } catch {
-                    failureReason = IntelligenceAdvisor.errorMessage(for: error)
-                }
-            }
             record.segments = segments
         }
 
-        record.adviceUnavailableReason = failureReason
-        try? store.update(record)
+        var canContinue = true
+        if record.advice == nil {
+            canContinue = await generate {
+                let advice = try await IntelligenceAdvisor.overallAdvice(for: record)
+                record.advice = advice
+            }
+            save()
+        }
+
+        // 生成中に得点のシーンが加わっても取り違えないよう、ID で探す
+        for segmentID in (record.segments ?? []).map(\.id) where canContinue {
+            guard let segment = record.segments?.first(where: { $0.id == segmentID }), segment.commentary == nil else { continue }
+            let segmentFrames = record.frames.filter { segment.contains($0.timestamp) }
+            let metrics = AnalysisMetrics(
+                frames: segmentFrames,
+                duration: segment.endTime - segment.startTime,
+                teams: record.teams,
+                players: record.players
+            )
+            let teams = record.teams
+            let usedRealModel = record.usedRealModel
+            canContinue = await generate {
+                let commentary = try await IntelligenceAdvisor.sceneCommentary(
+                    for: segment,
+                    metrics: metrics,
+                    teams: teams,
+                    usedRealModel: usedRealModel
+                )
+                if let index = record.segments?.firstIndex(where: { $0.id == segmentID }) {
+                    record.segments?[index].commentary = commentary
+                }
+            }
+            save()
+        }
+
+        let missing = record.advice == nil || (record.segments ?? []).contains { $0.commentary == nil }
+        record.adviceUnavailableReason = missing ? (failureReason ?? IntelligenceAdvisor.deferredMessage) : nil
+        save()
     }
 }

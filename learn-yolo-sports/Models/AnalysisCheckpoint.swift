@@ -35,4 +35,8 @@ nonisolated struct AnalysisCheckpoint: Codable, Identifiable {
     var players: [PlayerIdentity]?
     /// stage が .segmenting 以降で決定済み（commentary は生成済みのシーンだけ入っている）
     var segments: [SceneSegment]?
+    /// 1チームの人数（解析を始めたときの設定。途中で設定を変えても再開後の結果が変わらないように残す）
+    var playersPerTeam: Int? = nil
+    /// 同じ動画を選び直したときに見分けるための目印
+    var fingerprint: VideoFingerprint? = nil
 }

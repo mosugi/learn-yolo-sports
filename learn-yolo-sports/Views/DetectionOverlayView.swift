@@ -18,17 +18,29 @@ struct DetectionOverlayView: View {
     var compact = false
     /// ラベルを置かない領域（重ねて表示するボタンなど）
     var reservedArea: CGRect? = nil
+    /// 注目している選手。その選手の枠は PlayerFocusMarker が描くため除き、他の人は控えめに描く
+    var focusedPlayerID: Int? = nil
+    /// 指定すると、識別した選手の枠をタップしてその選手を選べるようにする（他の部分のタップは下の動画へ通す）
+    var onSelectPlayer: ((Int) -> Void)? = nil
+
+    private var visibleDetections: [SavedDetection] {
+        guard let focusedPlayerID else { return detections }
+        return detections.filter { $0.playerID != focusedPlayerID }
+    }
 
     var body: some View {
-        let visibleLabels = compact ? [:] : labelPlacement()
+        let isCompact = compact || focusedPlayerID != nil
+        let detections = visibleDetections
+        let visibleLabels = isCompact ? [:] : labelPlacement(for: detections)
         ZStack {
             ForEach(Array(detections.enumerated()), id: \.offset) { _, detection in
                 let box = rect(for: detection)
                 let color = overlayColor(for: detection)
                 Rectangle()
-                    .strokeBorder(color, lineWidth: compact || detection.isExcluded ? 1.5 : 3)
+                    .strokeBorder(color, lineWidth: isCompact || detection.isExcluded ? 1.5 : 3)
                     .background(color.opacity(0.1))
                     .frame(width: max(0, box.width), height: max(0, box.height))
+                    .modifier(PlayerTapModifier(playerID: detection.isExcluded ? nil : detection.playerID, onSelect: onSelectPlayer))
                     .position(x: box.midX, y: box.midY)
             }
 
@@ -45,6 +57,25 @@ struct DetectionOverlayView: View {
                     .cornerRadius(4)
                     .fixedSize()
                     .position(x: placement.frame.midX, y: placement.frame.midY)
+                    .allowsHitTesting(false)
+            }
+        }
+        .opacity(focusedPlayerID == nil ? 1 : 0.5)
+    }
+
+    /// 選手の枠だけをタップできるようにする
+    private struct PlayerTapModifier: ViewModifier {
+        let playerID: Int?
+        let onSelect: ((Int) -> Void)?
+
+        func body(content: Content) -> some View {
+            if let playerID, let onSelect {
+                content
+                    .contentShape(Rectangle())
+                    .onTapGesture { onSelect(playerID) }
+                    .accessibilityAddTraits(.isButton)
+            } else {
+                content.allowsHitTesting(false)
             }
         }
     }
@@ -68,7 +99,7 @@ struct DetectionOverlayView: View {
     /// ラベルの置き場所。密集した場面で読めなくならないよう、ボールと手前（画面下側）の選手から順に、
     /// 枠の上（だめなら下）で、他のラベル・他の選手の枠・予約領域と重ならず画面に収まる位置に置く。
     /// どこにも置けないラベルは出さない
-    private func labelPlacement() -> [Int: LabelPlacement] {
+    private func labelPlacement(for detections: [SavedDetection]) -> [Int: LabelPlacement] {
         let order = detections.indices
             .filter { !detections[$0].isExcluded }
             .sorted { lhs, rhs in
