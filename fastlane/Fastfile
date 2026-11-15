@@ -11,6 +11,26 @@ platform :ios do
     )
   end
 
+  # 配布用の証明書とプロファイルを match の非公開リポジトリから読み出す
+  #
+  # 以前は -allowProvisioningUpdates による Xcode のクラウド署名を使っていたが、CI のマシンは毎回まっさらなため
+  # アーカイブのたびに Apple Development 証明書が作られ、上限に達して配信できなくなった。
+  # match で 1 組の証明書を暗号化して保存し、CI ではそれを読み出すだけにする。
+  # 保存先・パスフレーズは環境変数 MATCH_GIT_URL / MATCH_PASSWORD / MATCH_GIT_BASIC_AUTHORIZATION で渡す
+  def app_store_profile(readonly: true)
+    UI.user_error!("MATCH_GIT_URL が未設定です。docs/STORE_RELEASE.md の「署名用の証明書を用意する」を参照してください") if ENV["MATCH_GIT_URL"].to_s.empty?
+    # CI では一時的なキーチェーンを作り、そこに証明書を入れる
+    setup_ci
+    match(type: "appstore", readonly: readonly, api_key: api_key)
+    app_identifier = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
+    ENV["sigh_#{app_identifier}_appstore_profile-name"]
+  end
+
+  desc "配布用の証明書とプロファイルを作って match の非公開リポジトリに保存する（最初に 1 回、または期限切れのとき）"
+  lane :certificates do
+    app_store_profile(readonly: false)
+  end
+
   desc "ビルド番号を上げてアーカイブを作成し、TestFlight に配信する"
   lane :beta do
     # モデル未配置のままビルドするとモック（ランダムな検出結果）で動くアプリが配信されてしまう
@@ -25,16 +45,23 @@ platform :ios do
       build_number: latest_testflight_build_number(initial_build_number: 0) + 1
     )
 
-    # -allowProvisioningUpdates + API キーで Xcode のクラウド署名を使い、
-    # 配布用証明書・プロファイルを CI 上で自動取得する（match 等は不要）
+    # match の証明書とプロファイルで手動署名する（CI 上だけでプロジェクトの設定を書き換える）
+    app_identifier = CredentialsManager::AppfileConfig.try_fetch_value(:app_identifier)
+    profile = app_store_profile
+    update_code_signing_settings(
+      use_automatic_signing: false,
+      path: "learn-yolo-sports.xcodeproj",
+      targets: ["learn-yolo-sports"],
+      build_configurations: ["Release"],
+      code_sign_identity: "Apple Distribution",
+      profile_name: profile
+    )
     build_app(
-      xcargs: [
-        "-allowProvisioningUpdates",
-        "-authenticationKeyPath #{ENV['ASC_KEY_FILEPATH']}",
-        "-authenticationKeyID #{ENV['ASC_KEY_ID']}",
-        "-authenticationKeyIssuerID #{ENV['ASC_ISSUER_ID']}"
-      ].join(" "),
-      export_options: { signingStyle: "automatic", teamID: CredentialsManager::AppfileConfig.try_fetch_value(:team_id) }
+      export_options: {
+        signingStyle: "manual",
+        teamID: CredentialsManager::AppfileConfig.try_fetch_value(:team_id),
+        provisioningProfiles: { app_identifier => profile }
+      }
     )
 
     upload_to_testflight(

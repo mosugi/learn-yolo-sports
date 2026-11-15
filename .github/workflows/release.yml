@@ -9,6 +9,7 @@ on:
         type: choice
         options:
           - beta
+          - certificates
           - upload_metadata
           - screenshots
           - capture
@@ -92,6 +93,10 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_FILEPATH: ${{ runner.temp }}/asc_api_key.p8
+          # 署名に使う証明書・プロファイルの保存先（fastlane match）
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
         run: bundle exec fastlane "$LANE"
 
       - name: Upload screenshots
