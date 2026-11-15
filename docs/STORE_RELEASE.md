@@ -9,6 +9,7 @@ TestFlight 配信、App Store の申請情報の入力、スクリーンショ�
 | やること | 実行方法 | API キー |
 |---|---|---|
 | ビルド・署名・TestFlight 配信 | `main` へ push（または `lane=beta`） | 必要 |
+| 署名用の証明書・プロファイルの作成（最初に 1 回、期限切れのとき） | `lane=certificates` | 必要 |
 | 申請情報の入力（説明文・スクショ・年齢制限・価格・配信地域・ビルド紐付けなど） | `lane=upload_metadata` | 必要 |
 | スクリーンショット撮影 + 申請情報の入力 | `lane=screenshots` | 必要 |
 | スクリーンショット撮影のみ（Artifacts に保存） | `lane=capture` | 不要 |
@@ -58,7 +59,11 @@ PRIVACY.md                         プライバシーポリシー
 
 ### コード署名
 
-証明書・プロビジョニングプロファイルの管理（match など）は不要です。`xcodebuild -allowProvisioningUpdates` に App Store Connect API キーを渡し、Xcode のクラウド署名で署名します。API キーは **Admin** 権限が必要です。
+配布用の証明書（Apple Distribution）と App Store 用のプロビジョニングプロファイルを [fastlane match](https://docs.fastlane.tools/actions/match/) で 1 組だけ作り、暗号化して非公開リポジトリに保存しています。CI はそれを読み出して手動署名するだけで、証明書を作りません。
+
+以前は `xcodebuild -allowProvisioningUpdates` による Xcode のクラウド署名を使っていました。しかし CI のマシンは毎回まっさらなため、アーカイブのたびに Apple Development 証明書が 1 枚ずつ作られ、15 回ほどで「Your account has reached the maximum number of certificates」となって配信できなくなりました（2026 年 10 月）。
+
+証明書・プロファイルの作成にも App Store Connect API キーを使います（API キーは **Admin** 権限が必要）。
 
 ## 初回セットアップ手順
 
@@ -96,6 +101,45 @@ gh secret set ASC_KEY_P8_BASE64 --body "$(base64 -i AuthKey_XXXXXXXXXX.p8)"
 ```
 
 公開リポジトリでも Secrets はフォークからの PR には渡されません。fastlane ワークフローは `main` への push と手動実行でのみ動きます。
+
+### 4-2. 署名用の証明書を用意する
+
+1. 証明書を保存する **非公開** リポジトリを作る（中身は match が暗号化して入れる。このリポジトリとは別にする）
+
+   ```bash
+   gh repo create mosugi/learn-yolo-sports-certificates --private
+   ```
+
+2. そのリポジトリだけを読み書きできる GitHub の Fine-grained personal access token を作る
+   - [Settings > Developer settings > Fine-grained tokens](https://github.com/settings/personal-access-tokens/new)
+   - Repository access: 手順 1 のリポジトリだけ
+   - Permissions: Contents を Read and write
+
+3. Secrets を登録する。`MATCH_PASSWORD` は証明書を暗号化するパスフレーズで、新しく決めて控えておく
+
+   ```bash
+   gh secret set MATCH_GIT_URL --body "https://github.com/mosugi/learn-yolo-sports-certificates.git"
+   ```
+
+   ```bash
+   gh secret set MATCH_PASSWORD --body "決めたパスフレーズ"
+   ```
+
+   ```bash
+   gh secret set MATCH_GIT_BASIC_AUTHORIZATION --body "$(printf '%s' 'mosugi:手順 2 のトークン' | base64)"
+   ```
+
+4. 証明書とプロファイルを作って保存する
+
+   ```bash
+   gh workflow run release.yml -f lane=certificates
+   ```
+
+   Apple Distribution 証明書も上限（通常 2〜3 枚）に達していると失敗します。その場合は [Certificates](https://developer.apple.com/account/resources/certificates/list) で使っていない Apple Distribution 証明書を失効させてから、もう一度実行します。
+
+以前のクラウド署名で作られた Apple Development 証明書は、配信には使いません。同じ一覧で失効させてかまいませんが、手元の Mac の Xcode が使っている証明書は消さないよう、作成日や名前で見分けてください。
+
+証明書の期限（1 年）が切れたら、期限切れの証明書を失効させてから、もう一度 `lane=certificates` を実行します。
 
 ### 5. 初回配信
 
@@ -161,6 +205,7 @@ bundle exec fastlane deliver --submit_for_review --skip_binary_upload --skip_met
 | 症状 | 原因と対処 |
 |---|---|
 | `invalid curve name (OpenSSL::PKey::ECError)` | API キーの Secret が空。Secrets を登録する |
+| `Your account has reached the maximum number of certificates` | クラウド署名で CI のたびに証明書が作られていた。match に切り替えた（「コード署名」を参照） |
 | アップロードで失敗する | AppIcon（1024px、透過なし）が必須 |
 | エクスポート時に署名できない | ビルド番号はビルド設定ではなく `increment_build_number` で設定する |
 | 審査用連絡先の電話番号エラー | `+81 3 1234 5678` のように `+国番号` 始まり・スペース区切りで書く |
