@@ -69,27 +69,6 @@ nonisolated struct GeneratedMatchReport {
     var highlights: [String]
 }
 
-/// 生成した構造に含まれる、画面に出す文字列（崩れていないかを調べるために使う）
-nonisolated protocol GeneratedTexts {
-    var texts: [String] { get }
-}
-
-extension GeneratedAdvice: GeneratedTexts {
-    var texts: [String] { [summary] + observations + suggestions }
-}
-
-extension GeneratedSceneCommentary: GeneratedTexts {
-    var texts: [String] { [headline, commentary, suggestion, praise] + optionComments }
-}
-
-extension GeneratedPlayerAdvice: GeneratedTexts {
-    var texts: [String] { [summary] + strengths + improvements }
-}
-
-extension GeneratedMatchReport: GeneratedTexts {
-    var texts: [String] { [headline, story] + highlights }
-}
-
 /// Apple Intelligence（Foundation Models）を使って解析結果へのアドバイスを生成する
 ///
 /// UI の状態は持たず、ViewModel のパイプラインから呼ばれる async なサービス。
@@ -138,7 +117,9 @@ nonisolated enum IntelligenceAdvisor {
 
     /// 試合全体の総評を生成する
     static func overallAdvice(for record: SavedAnalysis) async throws -> AnalysisAdvice {
-        let generated = try await respond(to: overallPrompt(for: record), generating: GeneratedAdvice.self)
+        let generated = try await respond(to: overallPrompt(for: record), generating: GeneratedAdvice.self) {
+            [$0.summary] + $0.observations + $0.suggestions
+        }
         return AnalysisAdvice(
             summary: generated.summary,
             observations: generated.observations,
@@ -155,7 +136,9 @@ nonisolated enum IntelligenceAdvisor {
         usedRealModel: Bool
     ) async throws -> SceneCommentary {
         let prompt = scenePrompt(segment: segment, metrics: metrics, teams: teams, usedRealModel: usedRealModel)
-        let generated = try await respond(to: prompt, generating: GeneratedSceneCommentary.self)
+        let generated = try await respond(to: prompt, generating: GeneratedSceneCommentary.self) {
+            [$0.headline, $0.commentary, $0.suggestion, $0.praise] + $0.optionComments
+        }
 
         let options = segment.tactics?.options ?? []
         // 数が合わない・存在しない番号のときは使わない（画面では幾何計算の説明・おすすめにフォールバックする）
@@ -177,7 +160,9 @@ nonisolated enum IntelligenceAdvisor {
             to: matchPrompt(for: record, playByPlay: playByPlay),
             generating: GeneratedMatchReport.self,
             instructions: commentatorInstructions
-        )
+        ) {
+            [$0.headline, $0.story] + $0.highlights
+        }
         return MatchReport(
             headline: generated.headline,
             story: generated.story,
@@ -188,7 +173,9 @@ nonisolated enum IntelligenceAdvisor {
 
     /// 指定した選手の動きへのアドバイスを生成する
     static func playerAdvice(metrics: PlayerMetrics, usedRealModel: Bool) async throws -> PlayerAdvice {
-        let generated = try await respond(to: playerPrompt(metrics: metrics, usedRealModel: usedRealModel), generating: GeneratedPlayerAdvice.self)
+        let generated = try await respond(to: playerPrompt(metrics: metrics, usedRealModel: usedRealModel), generating: GeneratedPlayerAdvice.self) {
+            [$0.summary] + $0.strengths + $0.improvements
+        }
         return PlayerAdvice(
             playerID: metrics.player.id,
             summary: generated.summary,
@@ -207,7 +194,9 @@ nonisolated enum IntelligenceAdvisor {
            case .rateLimited = generationError {
             return true
         }
+        #if compiler(>=6.3)
         if #available(iOS 27.0, *), case .rateLimited = error as? LanguageModelError { return true }
+        #endif
         return false
     }
 
@@ -219,20 +208,22 @@ nonisolated enum IntelligenceAdvisor {
 
     /// 新しいセッションで生成する。入力は短くても、モデルが同じ文を繰り返して出力が上限を超えたり、
     /// 指示文を書き写したりすることがあるため、そのときは出力の長さを制限して1回だけやり直す
-    private static func respond<Content: Generable & GeneratedTexts>(
+    /// - Parameter texts: 生成した構造から、画面に出す文字列を取り出す（崩れていないかを調べるために使う）
+    private static func respond<Content: Generable>(
         to prompt: String,
         generating type: Content.Type,
-        instructions: String = instructions
+        instructions: String = instructions,
+        texts: (Content) -> [String]
     ) async throws -> Content {
         do {
             let content = try await LanguageModelSession(instructions: instructions).respond(to: prompt, generating: type).content
-            if isWellFormed(content) { return content }
+            if isWellFormed(texts(content)) { return content }
         } catch where isContextSizeExceeded(error) {
             // 下でやり直す
         }
         let options = GenerationOptions(temperature: retryTemperature, maximumResponseTokens: retryMaximumResponseTokens)
         let content = try await LanguageModelSession(instructions: instructions).respond(to: prompt, generating: type, options: options).content
-        guard isWellFormed(content) else { throw AdvisorError.malformedOutput }
+        guard isWellFormed(texts(content)) else { throw AdvisorError.malformedOutput }
         return content
     }
 
@@ -241,8 +232,8 @@ nonisolated enum IntelligenceAdvisor {
     /// 1つの項目の長さの上限。最も長い試合の解説（4〜6文）でも収まり、これを超えるのは繰り返しに陥ったとき
     private static let maximumSentenceLength = 500
 
-    private static func isWellFormed(_ content: some GeneratedTexts) -> Bool {
-        content.texts.allSatisfy { text in
+    private static func isWellFormed(_ texts: [String]) -> Bool {
+        texts.allSatisfy { text in
             text.count <= maximumSentenceLength && !leakMarkers.contains { text.contains($0) }
         }
     }
@@ -254,7 +245,9 @@ nonisolated enum IntelligenceAdvisor {
 
     private static func isContextSizeExceeded(_ error: Error) -> Bool {
         if case .exceededContextWindowSize = error as? LanguageModelSession.GenerationError { return true }
+        #if compiler(>=6.3)
         if #available(iOS 27.0, *), case .contextSizeExceeded = error as? LanguageModelError { return true }
+        #endif
         return false
     }
 
@@ -264,7 +257,8 @@ nonisolated enum IntelligenceAdvisor {
         if case AdvisorError.malformedOutput = error {
             return "AI の出力が崩れていたため表示できませんでした。もう一度お試しください。"
         }
-        // iOS 27 からは LanguageModelError で返る
+        // iOS 27 からは LanguageModelError で返る（この型は Xcode 27 の SDK にしかない）
+        #if compiler(>=6.3)
         if #available(iOS 27.0, *), let modelError = error as? LanguageModelError {
             switch modelError {
             case .contextSizeExceeded:
@@ -281,6 +275,7 @@ nonisolated enum IntelligenceAdvisor {
                 return "アドバイスを生成できませんでした。"
             }
         }
+        #endif
         if let generationError = error as? LanguageModelSession.GenerationError {
             switch generationError {
             case .rateLimited:
